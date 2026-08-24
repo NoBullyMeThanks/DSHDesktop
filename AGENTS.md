@@ -30,6 +30,10 @@
 
 新增提示状态时应复用现有 loading、info、confirm、error 或 progress 模式，并实现焦点锁定、Esc 取消、Enter 默认操作、关闭后恢复焦点、重复点击保护及 `prefers-reduced-motion`。文案统一加入 `i18n.js`；IPC 必须校验来源，不得向 DSH 页面暴露 Electron API；新增启动资源必须加入 electron-builder 文件列表。
 
+## DSH 插件开发（如涉及）
+
+开发或审查 DSH（`@deepseek-ai/dsh` / Cordis）插件时，先通读 [`docs/plugin-dev-conventions.md`](docs/plugin-dev-conventions.md)，按其"事实来源"与"验收清单"执行；以本机已装版本的官方 `dsh-*` 包为模板，不从记忆自创结构。交付前运行 `node scripts/check-plugin-conformance.js <插件目录>`（`--strict`）并做 profile 运行时验证（`--dump-config`、启动冒烟），确认无 patch 告警、无 inject/Config 缺失。
+
 ## 提交与 Pull Request
 
 - 提交信息必须采用简洁的 Conventional Commits 格式 `type: 中文说明`；类型使用小写英文（如 `feat`、`fix`、`chore`），说明使用中文，例如 `fix: 处理 DSH 启动超时`。
