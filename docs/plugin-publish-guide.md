@@ -38,67 +38,85 @@ node scripts/check-plugin-conformance.js <插件目录> --strict
 - [ ] client 半区是**独立包**(见 §3),`dsh.client.inject` 声明的 `@deepseek-ai/dsh-client-*` 在
   `peerDependencies`(版本同 DSH 线),外部化的 react 等放在 `devDependencies`。
 
-## 1. 每次发布流程(GitHub Releases,顺序不可乱)
+## 1. 每次发布流程(GitHub Releases)
 
 > **一键脚本 `pnpm release`**(由 `dsh-plugin-development` 技能随附,两个插件已内置同一份)。
 > 脚本自动完成
-> "构建 → 打包 client → 临时把 host 的 client 依赖改写为资产 URL → 打包 host →
+> "构建 → 打包 client → **临时从 host manifest 移除 client 依赖** → 打包 host →
 > **恢复 manifest 为 link: 开发形态**";需要你手动做的只剩上传。以下手动流程与脚本等价,保留作备选。
+>
+> ⚠️ **发布形态为什么"移除"而不是"URL 依赖"**:pnpm 11 默认开启 `blockExoticSubdeps`,
+> 只允许根 package.json 直接使用 exotic 源(git/URL tarball),**传递依赖**(host 里的 client URL)
+> 一律拦截 → 用户装 host 时直接 `ERR_PNPM_EXOTIC_SUBDEP`。所以 client 必须由用户**显式安装为
+> 顶层依赖**(`file:` 本地 tgz,顶层不受拦截)。这是 GitHub Releases 线
+> (无 npm registry) 的唯一无配置可行形态,已本机端到端实测验证。
 
 ### 1.1 一键发布(推荐)
 
 ```powershell
 cd E:\dsh-desktop\plugin\workspace-file-tree
-pnpm release            # → plugin\release\v0.1.0\ 下生成 2 个 tgz,manifest 自动恢复
+pnpm release            # → plugin\release\plugin-v1.0.0\ 下生成 2 个 tgz,manifest 自动恢复
 cd E:\dsh-desktop\plugin\dsh-usage-monitor
 pnpm release            # 同上
-# 然后:建 Release v0.1.0 → 先传两个 client tgz → 再传两个 host tgz(顺序不可乱)
+# 然后:建 Release plugin-v1.0.0 → 上传全部 4 个 tgz(无顺序要求)
 ```
+
+> tag 默认 `v<版本>`;与仓库中主应用(DSHDesktop 自身)的 v2.x tag 冲突时用
+> `$env:DSH_RELEASE_TAG='plugin-v1.0.0'` 显式指定插件专用 tag(本仓库惯例)。
+
+**用户安装(下载两个 tgz 到同一目录后执行)**:
+
+```powershell
+# 用户下载两个 tgz 到同一目录(如 D:\plugins\),在该目录执行:
+dsh plugin --profile <p> add file:./workspace-file-tree-client-1.0.0.tgz file:./workspace-file-tree-1.0.0.tgz
+```
+
+安装时出现的 `declares no dsh.bundle — installed as a plain dependency` 警告是**预期无害**的:
+client 半区本来就没有 `dsh.bundle`(它是纯浏览器插件),装成普通依赖后 DSH 的 loader
+按包名解析照常工作(已验证:冒烟启动无告警、插件路由 200)。
 
 新插件开发时:从技能资源 `resources/release.mjs` 复制到 `<插件根>/scripts/` 并在
 `package.json` 的 `scripts` 加 `"release": "node scripts/release.mjs"` 即可获得同样的能力。
 可选用环境变量:`DSH_RELEASE_TAG`(默认 `v<host 版本>`)、`DSH_RELEASE_DIR`(默认
-`<项目根>/plugin/release/<tag>`);脚本结束时会打印:上传清单、用户安装命令、
-以及 client 资产 URL(即 host 包内嵌的那条依赖)。
+`<项目根>/plugin/release/<tag>`);脚本结束时会打印:上传清单与用户安装命令。
 
 ### 1.2 手动流程(与脚本等价,备选)
 
-以 v0.1.0、仓库 `github.com/<owner>/<repo>`(示例 `NoBullyMeThanks/DSHDesktop`)为例:
+以 plugin-v1.0.0、仓库 `github.com/<owner>/<repo>`(示例 `NoBullyMeThanks/DSHDesktop`)为例:
 
 ```powershell
-# ① 打两个 host?不——先打两个 client 包(无需改动,现在就能打)
+# ① 先打两个 client 包(无需改动,现在就能打)
 cd <插件>\workspace-file-tree\client        # 或对应 client 目录
-pnpm pack --pack-destination D:\releases\v0.1.0    # → workspace-file-tree-client-0.1.0.tgz
+pnpm pack --pack-destination D:\releases\plugin-v1.0.0    # → workspace-file-tree-client-1.0.0.tgz
 cd <插件>\dsh-usage-monitor\client
-pnpm pack --pack-destination D:\releases\v0.1.0    # → dsh-usage-monitor-client-0.1.0.tgz
+pnpm pack --pack-destination D:\releases\plugin-v1.0.0    # → dsh-usage-monitor-client-1.0.0.tgz
 
-# ② 在 GitHub 建 Release v0.1.0,先上传这两个 client tgz
-#    (必须先行:host 的依赖 URL 指向这些资产,资产不存在别人就装不上)
+# ② 在 GitHub 建 Release plugin-v1.0.0,上传这两个 client tgz(及后续两个 host tgz)
 
-# ③ 两个 host 的 package.json 各改一行:client 依赖 link: → 资产完整 URL
-#    只影响"发布物"——本机使用不受影响(profile 对 host/client 各自 link,
-#    DSH 运行时与 pnpm 本地解析都不读 host 的这一条依赖声明);
-#    打完包后想继续本地开发可改回 link:(prepack 守卫只在 pack 时运行)。
-#    "workspace-file-tree-client": "link:./client"
-#      → "https://github.com/<owner>/<repo>/releases/download/v0.1.0/workspace-file-tree-client-0.1.0.tgz"
+# ③ 两个 host 的 package.json 各删一行:移除 client 依赖(link:./client 是开发形态,
+#    发布物不携带——URL 依赖会被 pnpm 11 blockExoticSubdeps 拦截,link: 用户机器上无此目录;
+#    client 由用户显式安装为顶层依赖,不受拦截)
+#    打完包后想继续本地开发改回 link:(prepack 守卫只在 pack 时运行)
 
 # ④ 打两个 host 包(此时 prepack 守卫放行)
 cd <插件>\workspace-file-tree
-pnpm build;   pnpm pack --pack-destination D:\releases\v0.1.0   # → workspace-file-tree-0.1.0.tgz
+pnpm build;   pnpm pack --pack-destination D:\releases\plugin-v1.0.0   # → workspace-file-tree-1.0.0.tgz
 cd <插件>\dsh-usage-monitor
-pnpm build;   pnpm pack --pack-destination D:\releases\v0.1.0   # → dsh-usage-monitor-0.1.0.tgz
+pnpm build;   pnpm pack --pack-destination D:\releases\plugin-v1.0.0   # → dsh-usage-monitor-1.0.0.tgz
 
-# ⑤ 把两个 host tgz 上传到同一个 Release v0.1.0,发布完成
+# ⑤ 把两个 host tgz 上传到同一个 Release plugin-v1.0.0,发布完成
 ```
 
-**用户侧安装**(对方机器):
+**用户侧安装**(对方机器,下载两个 tgz 到同一目录后执行):
 
 ```sh
-dsh plugin --profile <p> add https://github.com/<owner>/<repo>/releases/download/v0.1.0/workspace-file-tree-0.1.0.tgz
+# 一条命令装两个,均无网络依赖:
+dsh plugin --profile <p> add file:./workspace-file-tree-client-1.0.0.tgz file:./workspace-file-tree-1.0.0.tgz
 ```
 
-pnpm 安装时:host 本体、client 子包来自你的 GitHub Release(各一次),其余公共依赖(chokidar/diff/
-codemirror/`@deepseek-ai/*` 等)走 npm 官方 registry;安装完成后运行完全本地化。
+pnpm 安装时:host 本体、client 子包是顶层依赖(来自本地文件),
+其余公共依赖(chokidar/diff/codemirror/`@deepseek-ai/*` 等)走 npm 官方 registry;
+安装完成后运行完全本地化。`declares no dsh.bundle` 警告为预期无害(client 无 profile 层声明)。
 
 ## 2. 打包细节与产物核对
 
@@ -112,10 +130,10 @@ codemirror/`@deepseek-ai/*` 等)走 npm 官方 registry;安装完成后运行完
   `<项目根>/plugin/release/<tag>/`,可用 `DSH_RELEASE_DIR` 改;
 - 打包后抽查内容(必须含 lib、cordis.patch.yml、LICENSE、README):
   ```sh
-  tar -tf D:\releases\v0.1.0\workspace-file-tree-0.1.0.tgz
-  tar -xOf 该tgz package/package.json   # 确认 host→client 依赖是 URL,不是 link:
+  tar -tf D:\releases\plugin-v1.0.0\workspace-file-tree-1.0.0.tgz
+  tar -xOf 该tgz package/package.json   # 确认无 client 依赖(发布形态不含 link:/URL)
   ```
-- 本机成品样板:`E:\dsh-desktop\plugin\release\v0.1.0\`(4 个 tgz,host 已内嵌正确 URL)。
+- 本机成品样板:`E:\dsh-desktop\plugin\release\plugin-v1.0.0\`(4 个 tgz,host 均不含 client 依赖)。
 
 ## 3. 关键机制(为什么必须这样)
 
@@ -123,8 +141,9 @@ codemirror/`@deepseek-ai/*` 等)走 npm 官方 registry;安装完成后运行完
 2. **client 必须是独立包**:`dsh-client-modules` 按"**包清单**声明 `dsh.client`"发现浏览器插件。
    若把 client 合进 host 作为子路径导出,host 入口与 client 共享同一份 package.json,host 入口会被
    误判为浏览器插件 → 浏览器端尝试加载 node 代码而炸掉。
-3. **`link:` 禁用**:`link:./client` 写进发布物后,消费者(注册表/URL 安装)无法解析本地相对路径。
-   开发期由 profile 层对 host/client 分别 `link:` 保持本地开发,发布形态则用资产 URL。
+3. **`link:` 禁用**:`link:./client` 写进发布物后,消费者无法解析本地相对路径。
+   开发期由 profile 层对 host/client 分别 `link:` 保持本地开发;发布形态**移除**该依赖
+   (client 由用户显式安装为顶层依赖),避免 `blockExoticSubdeps` 拦截。
 4. **cordis 放 peer**:宿主(DSH + 官方插件)共用一份 cordis 实例;放 dependencies 会引入第二份,
    `Service` 类身份不同 → 注入/服务发现失配。
 5. **repository 是纯元数据**:只有 npmjs/GitHub 页面与 `npm view` 读取;安装、加载、运行都不走它。
@@ -134,8 +153,11 @@ codemirror/`@deepseek-ai/*` 等)走 npm 官方 registry;安装完成后运行完
 
 ## 4. 注意事项清单
 
-- **三处一致性**:Release tag、4 个包的 `version`、host 里的 client 资产 URL,必须完全一致
-  (资产名 = `<包名>-<版本>.tgz`)。升级时三处同步改。
+- **三处一致性**:Release tag、4 个包的 `version`、用户安装命令中的资产名,必须完全一致
+  (资产名 = `<包名>-<版本>.tgz`)。升级时同步改(仅本地自用时重跑 `release` 覆盖即可)。
+- **pnpm 11 `blockExoticSubdeps`(默认 true)**:发布物 host **必须不含** client 依赖
+  (URL 依赖在传递依赖位置会被拦截,`ERR_PNPM_EXOTIC_SUBDEP`);client 由用户显式安装为
+  顶层依赖(`file:` 本地 tgz,顶层不受拦截)。
 - 发布后无感:用 `pnpm release` 时 host manifest 由脚本**自动恢复为 `link:`**(已实测 end-to-end),
   本地开发与 profile 安装行为完全不变;手动流程则记得打完包改回。
 - DSH 官方线升级(如 0.1.1-rc.2 → 0.2.0)时,先按 §0 的 semver 校验再批量更新 peer/dev 范围。
@@ -145,7 +167,8 @@ codemirror/`@deepseek-ai/*` 等)走 npm 官方 registry;安装完成后运行完
 
 | 症状 | 原因 | 处理 |
 |---|---|---|
-| 用户装了整套但插件不生效 | host 缺 `exports["./cordis.patch.yml"]` 或 client URL 资产不存在 | 按 §0 自检后重发 |
-| `pnpm pack` 报错退出 | prepack 守卫拦下 `link:`/`file:`/`workspace:` 依赖 | 换成资产 URL 或 semver 后再打(这正说明守卫在工作) |
-| 用户装 host 后缺 client 页签 | host→client 依赖未换成 URL,或资产名/tag 对不上 | 核对 §1 步骤②③与 §4 一致性 |
+| 用户装了整套但插件不生效 | host 缺 `exports["./cordis.patch.yml"]` 或 client 未安装 | 按 §0 自检后重发;确认用户安装命令含 client |
+| `pnpm pack` 报错退出 | prepack 守卫拦下 `link:`/`file:`/`workspace:` 依赖 | 移除该依赖后再打(这正说明守卫在工作) |
+| 用户装 host 后缺 client 页签 | client 未显式安装,或资产名/tag 对不上 | 核对 §1 安装命令与 §4 一致性 |
+| 用户安装报 `ERR_PNPM_EXOTIC_SUBDEP` | host 包仍带 client 依赖(旧发布物) | 用新 release 脚本重打 |
 | 安装时版本告警/解析到旧版 | peer 范围不含当前 DSH 线(prerelease 元组规则) | semver 实测后对齐 |
