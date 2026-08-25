@@ -4,7 +4,7 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
-const resolver = require('../workspace-resolver.js')
+const resolver = require('../src/workspace-resolver.js')
 
 /** 在临时目录里造一份 dsh 数据布局，返回 dshHome 路径。 */
 function makeFakeDshHome(t, { workspaces = [], sessionDirs = [] } = {}) {

@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'">
 <title>终端</title>
-<link rel="stylesheet" href="terminal-assets/xterm.css">
+<link rel="stylesheet" href="assets/xterm.css">
 <style>
   :root {
     --bg: #ffffff;
@@ -129,7 +129,7 @@
     flex: 1;
     min-width: 0;
     position: relative;
-    /* 与 xterm 主题背景同色（terminal.js 按主题同步 --term-bg）：
+    /* 与 xterm 主题背景同色（renderer.js 按主题同步 --term-bg）：
        fit 取整余量与切换瞬间的裁切区不可见，避免露出异色条/块 */
     background: var(--term-bg, #ffffff);
   }
@@ -281,9 +281,9 @@
     </div>
   </div>
   <div class="status" id="status">正在连接…</div>
-  <script src="terminal-assets/xterm.js"></script>
-  <script src="terminal-assets/addon-fit.js"></script>
-  <script src="terminal-assets/addon-clipboard.js"></script>
-  <script src="terminal.js"></script>
+  <script src="assets/xterm.js"></script>
+  <script src="assets/addon-fit.js"></script>
+  <script src="assets/addon-clipboard.js"></script>
+  <script src="renderer.js"></script>
 </body>
 </html>

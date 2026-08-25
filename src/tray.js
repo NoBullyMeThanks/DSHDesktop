@@ -12,7 +12,7 @@ const TRAY_ICON_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAQElEQV
 
 /** 加载 DeepSeek 鱼形托盘图标；缺失时退回内嵌图标，保证托盘区域不空白。 */
 function loadTrayIcon() {
-  const img = nativeImage.createFromPath(path.join(__dirname, 'assets', 'tray.png'))
+  const img = nativeImage.createFromPath(path.join(__dirname, '..', 'assets', 'tray.png'))
   if (!img.isEmpty()) return img
   return nativeImage.createFromDataURL(`data:image/png;base64,${TRAY_ICON_BASE64}`)
 }

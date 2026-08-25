@@ -12,7 +12,7 @@ const {
   extractDebuggerWsUrl,
   captureInspectorStack,
   captureStallDiagnostics,
-} = require('../stall-diagnostics.js')
+} = require('../src/stall-diagnostics.js')
 
 /** 起一个持续吃 CPU 的临时 node 子进程，用完必须 kill。 */
 function spawnBusyNode() {

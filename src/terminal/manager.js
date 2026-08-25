@@ -16,11 +16,11 @@ const os = require('node:os')
 const fs = require('node:fs')
 const crypto = require('node:crypto')
 const { app, WebContentsView, ipcMain, nativeTheme, protocol } = require('electron')
-const runtime = require('./runtime-manager.js')
-const utils = require('./terminal-utils.js')
-const { TerminalHostClient } = require('./terminal-host-client.js')
-const { t } = require('./i18n.js')
-const workspaceResolver = require('./workspace-resolver.js')
+const runtime = require('../runtime-manager.js')
+const utils = require('./utils.js')
+const { TerminalHostClient } = require('./host-client.js')
+const { t } = require('../i18n.js')
+const workspaceResolver = require('../workspace-resolver.js')
 
 /**
  * 面板页面的专用 scheme。沙箱渲染进程里 file:// 页面无法加载 file:// 子资源
@@ -34,13 +34,13 @@ protocol.registerSchemesAsPrivileged([
 ])
 
 /**
- * 面板入口地址（相对引用 terminal.js 等子资源解析到同一 scheme）。
+ * 面板入口地址（相对引用 renderer.js 等子资源解析到同一 scheme）。
  * 携带停靠模式查询参数：持久化停靠为 right 时，页面首帧即按右停靠布局渲染，
  * 避免「首启右停靠却按 bottom 布局渲染、面板顶部出现水平拖动条」的错版
  * （用户实测：切换一次停靠后才恢复，因为首个 dock-state 在页面加载前发送会丢失）。
  */
 function panelEntry(mode) {
-  return `${PANEL_SCHEME}://local/terminal.html?dock=${mode}`
+  return `${PANEL_SCHEME}://local/panel/index.html?dock=${mode}`
 }
 
 /** node-pty 安装目录（与 pty-host.js 的默认模块目录一致）。 */
@@ -62,7 +62,7 @@ const RIGHT_DOCK_MIN_WIDTH = 320
 const RIGHT_DOCK_MAX_RATIO = 0.6
 /** 右侧停靠时顶部让出的最小高度（窗口按钮区 28px，WebContentsView 永远盖在页面之上）。 */
 const RIGHT_DOCK_TOP_INSET = 28
-/** 面板 header 高度（terminal.html 的 .header），用于与 DSH 标题区域底边线对齐。 */
+/** 面板 header 高度（panel/index.html 的 .header），用于与 DSH 标题区域底边线对齐。 */
 const PANEL_HEADER_HEIGHT = 34
 
 function createTerminalManager({
@@ -83,7 +83,7 @@ function createTerminalManager({
   let disposed = false
   // 当前停靠模式由本模块持有，外部持久化（preferences.json）只是副作用
   let dock = 'bottom'
-  // 会话区域几何（content-preload 从 DSH 页面观测上报，缺失时回退全宽）
+  // 会话区域几何（preload.js 从 DSH 页面观测上报，缺失时回退全宽）
   let layout = null // { sidebarRight, contentRight, headerBottom }
   // 页面浮层状态（设置面板/弹窗）：浮层出现时自动收起面板，关闭后恢复
   let overlayOpen = false
@@ -213,7 +213,7 @@ function createTerminalManager({
       // 立即退出，安装版终端表现为红灯、无默认会话、加号无效。开发模式
       // __dirname 是真实源码目录，直接使用即可。
       const hostPath = app.isPackaged
-        ? path.join(process.resourcesPath, 'app.asar.unpacked', 'pty-host.js')
+        ? path.join(process.resourcesPath, 'app.asar.unpacked', 'src', 'terminal', 'pty-host.js')
         : path.join(__dirname, 'pty-host.js')
       const client = new TerminalHostClient({
         hostPath,
@@ -421,7 +421,7 @@ function createTerminalManager({
       updatePanelBounds()
     })
 
-    // DSH 页面布局观测（content-preload 上报，只校验 sender 与数值）
+    // DSH 页面布局观测（preload.js 上报，只校验 sender 与数值）
     ipcMain.on('dsh:content-layout', (event, payload) => {
       const win = getMainWindow()
       if (!win || win.isDestroyed() || event.sender !== win.webContents) return
@@ -442,7 +442,7 @@ function createTerminalManager({
       updatePanelBounds()
     })
 
-    // 页面浮层状态（content-preload 检测：设置面板/弹窗等）
+    // 页面浮层状态（preload.js 检测：设置面板/弹窗等）
     // WebContentsView 永远盖在页面之上，浮层出现时工具栏面板会在其下被遮挡——
     // 自动收起（会话保留），浮层关闭后恢复，与「模态优先」的交互语义一致。
     ipcMain.on('dsh:overlay-state', (event, payload) => {
@@ -471,7 +471,7 @@ function createTerminalManager({
     if (!win || win.isDestroyed()) return null
     panelView = new WebContentsView({
       webPreferences: {
-        preload: path.join(__dirname, 'terminal-preload.js'),
+        preload: path.join(__dirname, 'panel', 'preload.js'),
         nodeIntegration: false,
         contextIsolation: true,
         sandbox: true,
@@ -499,7 +499,7 @@ function createTerminalManager({
     return dock
   }
 
-  /** 按停靠模式与 DSH 会话区域几何计算面板 bounds（纯函数在 terminal-utils）。 */
+  /** 按停靠模式与 DSH 会话区域几何计算面板 bounds（纯函数在 utils）。 */
   function computeDockBounds(width, height) {
     return utils.computeDockBounds(width, height, {
       dock: dockMode(),
@@ -518,7 +518,7 @@ function createTerminalManager({
     return utils.panelInsetFor(computeDockBounds(width, height), dockMode())
   }
 
-  /** 下发面板内缩给 DSH 页面（content-preload 给会话区滚动体加 padding）。 */
+  /** 下发面板内缩给 DSH 页面（preload.js 给会话区滚动体加 padding）。 */
   function sendPanelInset() {
     const win = getMainWindow()
     if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return
@@ -609,8 +609,10 @@ function createTerminalManager({
     const allowedPanelFile = (filePath) => {
       const rel = path.relative(__dirname, filePath)
       if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return false
-      return rel === 'terminal.html' || rel === 'terminal.js'
-        || rel.startsWith(`terminal-assets${path.sep}`)
+      // 面板只允许自身页面（panel/index.html、panel/renderer.js）与 vendor 资源
+      // （panel/assets/**）；path.relative 返回平台分隔符，目录级改用 path.sep 拼接
+      return rel === path.join('panel', 'index.html') || rel === path.join('panel', 'renderer.js')
+        || rel.startsWith(path.join('panel', 'assets') + path.sep)
     }
     protocol.handle(PANEL_SCHEME, (request) => {
       try {

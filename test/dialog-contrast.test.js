@@ -7,7 +7,7 @@ const path = require('node:path')
 const vm = require('node:vm')
 
 function loadContrastHelpers() {
-  const source = fs.readFileSync(path.join(__dirname, '..', 'content-preload.js'), 'utf8')
+  const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'preload.js'), 'utf8')
   const context = {
     require: () => ({ ipcRenderer: { on() {}, send() {} } }),
     document: { readyState: 'loading', addEventListener() {} },

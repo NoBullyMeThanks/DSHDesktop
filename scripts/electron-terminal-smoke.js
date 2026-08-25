@@ -14,8 +14,8 @@ const fs = require('node:fs')
 const { spawnSync } = require('node:child_process')
 const { app, BrowserWindow, ipcMain, desktopCapturer } = require('electron')
 
-// 必须在 app ready 之前 require：terminal-manager 模块加载时会注册 dsh-term scheme
-const { createTerminalManager } = require(path.join(__dirname, '..', 'terminal-manager.js'))
+// 必须在 app ready 之前 require：src/terminal/manager 模块加载时会注册 dsh-term scheme
+const { createTerminalManager } = require(path.join(__dirname, '..', 'src', 'terminal', 'manager.js'))
 
 // 独立 userData：避免与正式应用的 userData 目录和单实例锁冲突
 app.setPath('userData', path.join(os.tmpdir(), 'dshdesktop-terminal-smoke'))
@@ -69,12 +69,12 @@ async function waitForPanelText(panel, predicate, timeoutMs, label) {
   throw new Error(`等待${label}超时`)
 }
 
-/** 从主窗口 contentView 里找出终端面板视图（URL 以 terminal.html 结尾，可能带查询参数）。 */
+/** 从主窗口 contentView 里找出终端面板视图（URL 以 panel/index.html 结尾，可能带查询参数）。 */
 function findPanelView(win) {
   const children = win.contentView.children ?? []
   for (const child of children) {
     try {
-      if (child.webContents && child.webContents.getURL().includes('terminal.html')) return child
+      if (child.webContents && child.webContents.getURL().includes('panel/index.html')) return child
     } catch {}
   }
   return null

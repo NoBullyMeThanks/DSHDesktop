@@ -24,8 +24,8 @@ const { t } = require('./i18n.js')
 const { createOperationLock } = require('./runtime-operation-lock.js')
 const { DEFAULT_UPDATE_PREFERENCES, normalizeUpdatePreferences } = require('./update-preferences.js')
 const { captureStallDiagnostics, extractDebuggerWsUrl } = require('./stall-diagnostics.js')
-const { centeredSplashBounds, normalizeSplashMode, splashLayoutForContent } = require('./startup-layout.js')
-const { createTerminalManager } = require('./terminal-manager.js')
+const { centeredSplashBounds, normalizeSplashMode, splashLayoutForContent } = require('./startup/layout.js')
+const { createTerminalManager } = require('./terminal/manager.js')
 
 /** 等待 dsh 打印就绪 URL 的超时（首启要初始化 profile，放宽到 120s）。 */
 const READY_TIMEOUT_MS = 120_000
@@ -37,7 +37,7 @@ const STALL_DIAGNOSTIC_SECOND_PASS_MS = 60_000
 /** 每次缩放半级，约等于 9.5%，沿用原有手感。 */
 const ZOOM_STEP = 0.5
 const APP_ID = 'com.deepseek.dshdesktop'
-const APP_ICON = path.join(__dirname, 'assets', 'icon.ico')
+const APP_ICON = path.join(__dirname, '..', 'assets', 'icon.ico')
 
 const LOG_FILE = path.join(runtime.BASE_DIR, 'dsh.log')
 const PREFERENCES_FILE = path.join(runtime.BASE_DIR, 'preferences.json')
@@ -179,7 +179,7 @@ function createSplash() {
     center: true,
     backgroundColor: '#00000000',
     webPreferences: {
-      preload: path.join(__dirname, 'startup-preload.js'),
+      preload: path.join(__dirname, 'startup', 'preload.js'),
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: true,
@@ -203,7 +203,7 @@ function createSplash() {
       splashReady = false
     }
   })
-  win.loadFile(path.join(__dirname, 'startup.html')).catch((err) => {
+  win.loadFile(path.join(__dirname, 'startup', 'index.html')).catch((err) => {
     appendLog(`[splash] loadFile failed: ${err.message}`)
     if (splash === win && !win.isDestroyed()) {
       dialog.showErrorBox('DSH Desktop', `启动界面无法加载：${err.message}`)
@@ -328,7 +328,7 @@ function createMainWindow(url) {
     backgroundColor: nativeTheme.shouldUseDarkColors ? '#151517' : '#ffffff',
     autoHideMenuBar: true,
     webPreferences: {
-      preload: path.join(__dirname, 'content-preload.js'),
+      preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: true,
@@ -420,7 +420,7 @@ function setupIpc() {
     } else if (action === 'close') {
       mainWindow.close()
     } else if (action === 'terminal') {
-      // 状态刷新由 terminal-manager 的 onPanelVisibleChange 回调统一负责
+      // 状态刷新由 terminal/manager 的 onPanelVisibleChange 回调统一负责
       terminalManager?.togglePanel()
     }
   })

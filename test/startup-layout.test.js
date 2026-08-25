@@ -6,7 +6,7 @@ const {
   centeredSplashBounds,
   normalizeSplashMode,
   splashLayoutForContent,
-} = require('../startup-layout.js')
+} = require('../src/startup/layout.js')
 
 test('启动窗口模式只接受 loading 和 error', () => {
   assert.equal(normalizeSplashMode('loading'), 'loading')

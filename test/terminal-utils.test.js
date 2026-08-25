@@ -1,7 +1,7 @@
 'use strict'
 const { test } = require('node:test')
 const assert = require('node:assert/strict')
-const utils = require('../terminal-utils.js')
+const utils = require('../src/terminal/utils.js')
 
 test('detectShell 按 pwsh → powershell.exe → cmd.exe 顺序探测', () => {
   const order = []

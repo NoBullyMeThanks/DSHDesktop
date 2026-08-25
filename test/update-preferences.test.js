@@ -2,7 +2,7 @@
 
 const test = require('node:test')
 const assert = require('node:assert/strict')
-const { normalizeUpdatePreferences } = require('../update-preferences.js')
+const { normalizeUpdatePreferences } = require('../src/update-preferences.js')
 
 test('旧版每周检查偏好迁移为默认启动检查并保留待更新版本', () => {
   const result = normalizeUpdatePreferences({

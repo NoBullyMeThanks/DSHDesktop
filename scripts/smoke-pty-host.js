@@ -10,7 +10,7 @@ const { spawn } = require('node:child_process')
 const readline = require('node:readline')
 const path = require('node:path')
 
-const HOST_PATH = path.join(__dirname, '..', 'pty-host.js')
+const HOST_PATH = path.join(__dirname, '..', 'src', 'terminal', 'pty-host.js')
 const SHELL = 'powershell.exe'
 const OVERALL_TIMEOUT_MS = 120_000
 const STEP_TIMEOUT_MS = 25_000

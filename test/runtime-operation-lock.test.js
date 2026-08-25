@@ -2,7 +2,7 @@
 
 const test = require('node:test')
 const assert = require('node:assert/strict')
-const { createOperationLock } = require('../runtime-operation-lock.js')
+const { createOperationLock } = require('../src/runtime-operation-lock.js')
 
 test('操作进行期间拒绝并发请求并在完成后释放', async () => {
   let release

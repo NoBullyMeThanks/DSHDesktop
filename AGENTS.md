@@ -2,7 +2,7 @@
 
 ## 项目结构与模块组织
 
-本仓库是面向 Windows 的 Electron 启动器，采用 CommonJS。`main.js` 负责应用生命周期、透明原生 Window Controls Overlay、快捷键及 DSH 子进程；BrowserWindow 直接加载 DSH 页面，不另设自定义标题栏页面。`content-preload.js` 负责外观观测和应用内隔离模态框；`startup.html` 与 `startup-preload.js` 实现主页面加载前的启动窗口。`runtime-manager.js` 管理 `@deepseek-ai/dsh` 的安装和更新；`settings-reader.js`、`i18n.js`、`tray.js` 分别处理设置、文案和托盘。静态图标位于 `assets/`，打包结果写入 `dist/`；不要提交生成物或 `node_modules/`。本地 DSH 插件源码位于 `plugin/<插件名>/`（每个插件一个目录，内含 `client/` 子包），发布产物写入 `plugin/release/<tag>/`（均被 .gitignore 覆盖）；插件打包发布流程见 [`docs/plugin-publish-guide.md`](docs/plugin-publish-guide.md)。
+本仓库是面向 Windows 的 Electron 启动器，采用 CommonJS。应用源码整体位于 `src/`：`main.js` 是入口，负责应用生命周期、透明原生 Window Controls Overlay、快捷键及 DSH 子进程；BrowserWindow 直接加载 DSH 页面，不另设自定义标题栏页面。`src/preload.js` 是 DSH 页面 preload，负责外观观测和应用内隔离模态框；`src/startup/`（index.html、preload.js、layout.js）实现主页面加载前的启动窗口。`src/runtime-manager.js` 管理 `@deepseek-ai/dsh` 的安装和更新；`src/settings-reader.js`、`src/i18n.js`、`src/tray.js` 分别处理设置、文案和托盘。内嵌终端子系统源码位于 `src/terminal/`（主进程模块 manager.js/host-client.js/utils.js/pty-host.js 在 terminal/ 根，面板页面与 xterm vendor 资源在 terminal/panel/）。静态图标位于 `assets/`，打包结果写入 `dist/`；不要提交生成物或 `node_modules/`。本地 DSH 插件源码位于 `plugin/<插件名>/`（每个插件一个目录，内含 `client/` 子包），发布产物写入 `plugin/release/<tag>/`（均被 .gitignore 覆盖）；插件打包发布流程见 [`docs/plugin-publish-guide.md`](docs/plugin-publish-guide.md)。
 
 ## 构建、测试与开发命令
 
@@ -10,7 +10,7 @@
 - `npm start`：以开发模式运行 `electron .`，用于本地手工验证。
 - `npm run build`：通过 electron-builder 生成 x64 NSIS 安装包和便携版，输出到 `dist/`。
 - `npm test`：使用 Node.js 内置测试运行器执行 `test/*.test.js`。
-- `node --check main.js`：对修改过的 JavaScript 文件做快速语法检查；其他文件可替换文件名重复执行。
+- `node --check src/main.js`：对修改过的 JavaScript 文件做快速语法检查；其他文件可替换文件名重复执行。
 
 - 开发和运行需要系统 PATH 中可用的 Node.js 和 npm；启动器不得硬编码 Node.js 版本门槛，实际兼容性由 DSH 启动结果决定。首次启动会访问 npm registry 下载 DSH 运行时。
 
@@ -24,11 +24,11 @@
 
 ## 弹窗与启动界面规范
 
-操作型提示统一使用 `content-preload.js` 创建的 Shadow DOM 模态框；主页面尚未加载时使用本地启动窗口。除启动界面自身无法创建或渲染外，不得使用 Windows 默认消息框。
+操作型提示统一使用 `src/preload.js` 创建的 Shadow DOM 模态框；主页面尚未加载时使用本地启动窗口。除启动界面自身无法创建或渲染外，不得使用 Windows 默认消息框。
 
 模态框应继承 DSH 的 CSS 变量并跟随深浅色：遮罩使用半透明背景和模糊效果；卡片宽度保持 380–440px、圆角 24px、内边距 24px，背景使用层级色并配合三级阴影；按钮高度 36px、圆角约 10px，主按钮使用 DSH primary token。仅为变量缺失提供中性回退色，避免硬编码出另一套视觉体系。启动窗口沿用相同的颜色层级、圆角、阴影、按钮和字体风格。
 
-新增提示状态时应复用现有 loading、info、confirm、error 或 progress 模式，并实现焦点锁定、Esc 取消、Enter 默认操作、关闭后恢复焦点、重复点击保护及 `prefers-reduced-motion`。文案统一加入 `i18n.js`；IPC 必须校验来源，不得向 DSH 页面暴露 Electron API；新增启动资源必须加入 electron-builder 文件列表。
+新增提示状态时应复用现有 loading、info、confirm、error 或 progress 模式，并实现焦点锁定、Esc 取消、Enter 默认操作、关闭后恢复焦点、重复点击保护及 `prefers-reduced-motion`。文案统一加入 `src/i18n.js`；IPC 必须校验来源，不得向 DSH 页面暴露 Electron API；新增启动资源必须加入 electron-builder 文件列表。
 
 ## DSH 插件开发（如涉及）
 
@@ -42,4 +42,4 @@ Pull Request 应说明动机、主要改动和验证命令，关联相关 issue�
 
 ## 安全与配置
 
-不要提交 API key、`.credentials.yaml` 或运行日志。DSH 页面必须保持 `contextIsolation: true`、`nodeIntegration: false` 和 `sandbox: true`。`content-preload.js` 只允许向主进程上报经过校验的外观状态，不得向页面暴露 Electron API；新增外部进程参数时避免拼接未经校验的用户输入。
+不要提交 API key、`.credentials.yaml` 或运行日志。DSH 页面必须保持 `contextIsolation: true`、`nodeIntegration: false` 和 `sandbox: true`。`src/preload.js` 只允许向主进程上报经过校验的外观状态，不得向页面暴露 Electron API；新增外部进程参数时避免拼接未经校验的用户输入。

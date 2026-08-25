@@ -5,7 +5,7 @@ const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
-const runtime = require('../runtime-manager.js')
+const runtime = require('../src/runtime-manager.js')
 
 function createRuntime(t, version = '1.2.3', withBin = true) {
   const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dshdesktop-runtime-'))

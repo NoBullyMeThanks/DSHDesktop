@@ -16,7 +16,7 @@ const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/
 /** 终端尺寸合理区间，与 pty-host.js 一致。 */
 const MIN_SIZE = 1
 const MAX_SIZE = 1000
-/** 右侧停靠参数（terminal-manager 与页面共用同一套几何约定）。 */
+/** 右侧停靠参数（manager 与页面共用同一套几何约定）。 */
 const RIGHT_DOCK_RATIO = 0.35
 const RIGHT_DOCK_MIN_WIDTH = 320
 const RIGHT_DOCK_MAX_RATIO = 0.6
@@ -26,7 +26,7 @@ const RIGHT_DOCK_TOP_INSET = 28
  *  面板顶边若直接取 headerBottom，其 header 顶边线会落在 [bottom, bottom+1)，
  *  两条线并排成 2px、无法重合。上移 1px 后两条线完全重叠，视觉上是一条线。 */
 const RIGHT_DOCK_TOP_OFFSET = 1
-/** 面板 header 高度（terminal.html 的 .header），用于与 DSH 标题区域底边线对齐。 */
+/** 面板 header 高度（panel/index.html 的 .header），用于与 DSH 标题区域底边线对齐。 */
 const PANEL_HEADER_HEIGHT = 34
 
 /**
@@ -77,7 +77,7 @@ function clampSize(value, fallback) {
 
 /**
  * 按停靠模式与 DSH 会话区域几何计算面板 bounds（纯函数，可单测）。
- * 与 terminal-manager 的 IPC/视图层解耦；layout 缺失时回退全宽/顶部下限。
+ * 与 manager 的 IPC/视图层解耦；layout 缺失时回退全宽/顶部下限。
  */
 function computeDockBounds(width, height, options = {}) {
   const dock = options.dock === 'right' ? 'right' : 'bottom'

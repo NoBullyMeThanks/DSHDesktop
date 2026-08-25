@@ -2,7 +2,7 @@
   "name": "dshdesktop",
   "version": "2.0.1",
   "description": "默认跟随 DeepSeek 官方最新版的 DSH 桌面启动器",
-  "main": "main.js",
+  "main": "src/main.js",
   "private": true,
   "license": "MIT",
   "author": "DSH Desktop",
@@ -22,27 +22,7 @@
       "output": "dist"
     },
     "files": [
-      "main.js",
-      "runtime-manager.js",
-      "runtime-operation-lock.js",
-      "update-preferences.js",
-      "settings-reader.js",
-      "tray.js",
-      "i18n.js",
-      "stall-diagnostics.js",
-      "startup-layout.js",
-      "content-preload.js",
-      "startup.html",
-      "startup-preload.js",
-      "pty-host.js",
-      "terminal-manager.js",
-      "terminal-host-client.js",
-      "terminal-utils.js",
-      "terminal.html",
-      "terminal-preload.js",
-      "terminal.js",
-      "terminal-assets",
-      "workspace-resolver.js",
+      "src",
       "assets/deepseek-official-fish-black.svg",
       "assets/icon.ico",
       "assets/icon.png",
@@ -50,7 +30,7 @@
       "package.json"
     ],
     "asarUnpack": [
-      "pty-host.js"
+      "src/terminal/pty-host.js"
     ],
     "win": {
       "icon": "assets/icon.ico",

@@ -1,6 +1,10 @@
 # 内嵌终端（Embedded Terminal）实施方案
 
 > 状态：**全部完成（M1–M4）并已提交** `ca2461d feat: 内嵌终端面板`
+> 目录说明：M4 之后的目录重构（避免终端文件散落在项目根）——应用源码已整体收拢到 `src/`：
+> 主进程模块（manager/host-client/utils/pty-host）位于 `src/terminal/`，面板页面与资源位于
+> `src/terminal/panel/`（index.html、renderer.js、preload.js、assets/），主进程入口 `src/main.js`、
+> DSH 页面 preload `src/preload.js`；本文档除「当前状态」章节外沿用重构前的文件名。
 > 目标：像 VS Code 一样在 DSH Desktop 窗口内直接打开一个底部终端面板，运行 PowerShell，默认工作目录为当前 DSH 工作区。
 
 ## 1. 已确认决策
@@ -26,27 +30,27 @@
 │  └───────────────────────────────────────────────────────┘  │
 │  ┌───────────────────────────────────────────────────────┐  │
 │  │  WebContentsView 终端面板（file://，sandbox）           │  │
-│  │  terminal.html + xterm.js + terminal-preload.js        │  │
+│  │  src/terminal/panel/index.html + xterm.js + preload.js │  │
 │  └───────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
 
-渲染层（terminal view）         主进程（Electron）              宿主（系统 Node）
+渲染层（src/terminal/panel）      主进程（Electron）              宿主（系统 Node）
 ┌──────────────────┐   IPC   ┌──────────────────┐   stdio   ┌──────────────────┐
-│ xterm.js         │ ⇄dsh:   │ terminal-        │ JSON Lines │ pty-host.js      │
-│ fit/resize/主题   │ terminal│ manager.js       │ ⇄         │ node-pty 会话     │
-│ 输入转发/输出渲染  │ -* 通道 │ 面板生命周期/校验  │           │ spawn/resize/write│
+│ xterm.js         │ ⇄dsh:   │ src/terminal/    │ JSON Lines │ src/terminal/    │
+│ fit/resize/主题   │ terminal│ manager.js       │ ⇄         │ pty-host.js      │
+│ 输入转发/输出渲染  │ -* 通道 │ 面板生命周期/校验  │           │ node-pty 会话     │
 └──────────────────┘         └──────────────────┘           └──────────────────┘
 ```
 
 三层职责：
 
-- **UI 层**：本地 `terminal.html`（`file://` 加载，`sandbox: true`、`contextIsolation: true`），只做终端渲染与输入转发，不接触任何 Electron API。
-- **桥接层**：`terminal-manager.js`（主进程）管理面板视图、会话表、IPC 来源校验、窗口 resize 联动、退出清理。
-- **PTY 层**：`pty-host.js`（跑在系统 Node ≥ 22.19 上）持有 node-pty 会话，通过 JSON Lines over stdio 与主进程通信。
+- **UI 层**：本地 `src/terminal/panel/index.html`（`file://` 加载，`sandbox: true`、`contextIsolation: true`），只做终端渲染与输入转发，不接触任何 Electron API。
+- **桥接层**：`src/terminal/manager.js`（主进程）管理面板视图、会话表、IPC 来源校验、窗口 resize 联动、退出清理。
+- **PTY 层**：`src/terminal/pty-host.js`（跑在系统 Node ≥ 22.19 上）持有 node-pty 会话，通过 JSON Lines over stdio 与主进程通信。
 
 ## 3. 组件设计
 
-### 3.1 pty-host.js（系统 Node 侧，新增文件）
+### 3.1 src/terminal/pty-host.js（系统 Node 侧，新增文件）
 
 **安装与加载**
 
@@ -97,13 +101,13 @@
 - 单个会话退出（shell 关闭）→ 发 `exit` 事件；kill 时优先 `pty.kill()`，**再对会话 pid 执行 `taskkill /pid <pid> /T /F`** 兜底杀整树（PowerShell 可能拉起子进程，与 `stopDsh()` 的整树杀模式一致，参考 [microsoft/node-pty#733](https://github.com/microsoft/node-pty/issues/733) 的进程残留教训）。
 - host 自身异常退出：主进程记录日志，面板显示「终端服务已退出」并可一键重启 host 与会话。
 
-### 3.2 terminal-manager.js（主进程，新增文件）
+### 3.2 src/terminal/manager.js（主进程，新增文件）
 
 职责：pty-host 生命周期、会话表、IPC 校验、面板视图管理、退出清理。挂载点为 `main.js` 的 `setupIpc()` 与 `before-quit`。
 
 **面板视图**
 
-- 懒创建：首次打开面板时才 `new WebContentsView({ webPreferences: { preload: terminal-preload.js, sandbox: true, contextIsolation: true, nodeIntegration: false } })`，`loadFile('terminal.html')`。
+- 懒创建：首次打开面板时才 `new WebContentsView({ webPreferences: { preload: src/terminal/panel/preload.js, sandbox: true, contextIsolation: true, nodeIntegration: false } })`，`loadURL('dsh-term://local/panel/index.html')`。
 - `mainWindow.contentView.addChildView(panelView)` 挂到主窗口；关闭面板只 `setVisible(false)`，**保留会话**（VS Code 行为）；应用退出时销毁。
 - 尺寸：高度 = 内容区高度的 35%，下限 160px，上限 70%；`mainWindow.on('resize')` 防抖 ~100ms 后重算 `setBounds`，并通知 UI 层重新 `fit()` + `pty.resize(cols, rows)`（否则列宽错乱）。
 - 打开面板时 `panelView.webContents.focus()`；用户点击 DSH 页面区域焦点自然回到 DSH 页（面板只占底部，不拦截上方点击）。
@@ -125,58 +129,58 @@
 **安全边界**（对应 AGENTS.md 要求）
 
 - 终端通道只接受面板 view 的 sender，`mainWindow.webContents`（DSH 页面）一律拒绝——DSH 页面永远拿不到终端 IPC。
-- `terminal-preload.js` 只通过 `contextBridge` 暴露窄接口（`onData/onTheme/onExit/sendInput/resize` 等），不暴露任何 Electron 对象；面板页面是本地 `file://`，无远程内容。
+- `src/terminal/panel/preload.js` 只通过 `contextBridge` 暴露窄接口（`onData/onTheme/onExit/sendInput/resize` 等），不暴露任何 Electron 对象；面板页面是本地 `file://`，无远程内容。
 - 终端输入是用户主动操作自己 shell 的行为，属功能本体；主进程不解析、不拼接终端内容，无注入面。
 
 **退出清理**
 
 - `before-quit`：向 host 发 `shutdown`（带 2s 超时），随后复用 `taskkill /T /F` 整树兜底；纳入 `runtime.killActiveChildren()` 的既有清理路径。
 
-### 3.3 terminal.html + terminal-preload.js（渲染层，新增文件）
+### 3.3 src/terminal/panel/index.html + src/terminal/panel/preload.js（渲染层，新增文件）
 
 **静态资源（vendoring）**
 
-- xterm 是 npm 包，而 electron-builder 只打包列出的文件，且仓库不提交 `node_modules`。做法：把 `@xterm/xterm` 的 `dist/xterm.js`、`dist/xterm.css`（及 `@xterm/addon-fit` 的 dist）**拷贝进 `terminal-assets/` 作为版本锁定的静态文件提交**，文件头部注释记录来源与版本，升级 xterm 时同步替换并更新注释。最小集：xterm + addon-fit；可选加 addon-web-links。
+- xterm 是 npm 包，而 electron-builder 只打包列出的文件，且仓库不提交 `node_modules`。做法：把 `@xterm/xterm` 的 `dist/xterm.js`、`dist/xterm.css`（及 `@xterm/addon-fit` 的 dist）**拷贝进 `terminal/panel/assets/` 作为版本锁定的静态文件提交**，文件头部注释记录来源与版本，升级 xterm 时同步替换并更新注释。最小集：xterm + addon-fit；可选加 addon-web-links。
 - 本地文件加载无网络依赖，离线可用（与启动窗口同思路）。
 
 **页面行为**
 
-- `terminal.html`：标题栏条（「终端」+ 关闭按钮）+ xterm 容器；样式复用 DSH CSS 变量（`--dsw-alias-*`），深色/浅色由 `terminal:theme` 驱动；字体栈 `"Cascadia Mono", Consolas, "Microsoft YaHei UI Mono", monospace`。
-- `terminal-preload.js`：`contextBridge.exposeInMainWorld('__terminalBridge', ...)`，把 IPC 包装成页面可用的窄 API；`window.addEventListener('resize')` + 防抖 → `fitAddon.fit()` → 上报 cols/rows。
+- `src/terminal/panel/index.html`：标题栏条（「终端」+ 关闭按钮）+ xterm 容器；样式复用 DSH CSS 变量（`--dsw-alias-*`），深色/浅色由 `terminal:theme` 驱动；字体栈 `"Cascadia Mono", Consolas, "Microsoft YaHei UI Mono", monospace`。
+- `src/terminal/panel/preload.js`：`contextBridge.exposeInMainWorld('__terminalBridge', ...)`，把 IPC 包装成页面可用的窄 API；`window.addEventListener('resize')` + 防抖 → `fitAddon.fit()` → 上报 cols/rows。
 - 粘贴：xterm 默认右键/`Ctrl+V` 粘贴路径需要 `@xterm/addon-clipboard` 或页面内用 `navigator.clipboard` 读取后走 `sendInput`（二选一，冒烟时验证中文与多行粘贴）。
 - 会话退出态：`terminal:exit` 后禁用输入，显示「进程已退出」，提供「重新打开」按钮（重新 spawn）。
 - 面板打开时自动聚焦；`Esc` 不强制收面板（避免与 shell 内程序冲突），收面板只走 `Ctrl+\`` / 按钮。
 
 ### 3.4 入口与集成（改动既有文件）
 
-**main.js**
+**src/main.js**
 
 - `setupShortcuts()` 新增隐藏菜单项：`{ label: t(locale, 'toggleTerminal'), accelerator: 'CmdOrCtrl+`', click: toggleTerminalPanel }`（`` ` `` 键；若与 DSH 页面快捷键冲突，冒烟后改 `Ctrl+Shift+\``）。
 - `setupIpc()` 新增 `dsh:terminal-toggle`（校验 sender 为 `mainWindow.webContents`，即窗口控件区按钮）。
-- `startup()` / `before-quit` 接入 `terminal-manager.js` 的初始化和清理。
+- `startup()` / `before-quit` 接入 `src/terminal/manager.js` 的初始化和清理。
 - `createMainWindow` 的窗口控件状态推送（`sendWindowControlsState`）不动，终端按钮由 preload 自绘 UI 直接发 IPC。
 
-**content-preload.js**
+**src/preload.js**
 
 - 窗口控件自绘区域（右上角）新增「终端」按钮（终端图标，沿用现有控件视觉），点击 `ipcRenderer.send('dsh:terminal-toggle')`，按下态由主进程回推状态（面板开/关）保持样式同步；不向页面暴露任何新 API。
 
-**tray.js**（可选）
+**src/tray.js**（可选）
 
 - 托盘菜单加「打开终端」：`showMainWindow()` + `toggleTerminalPanel(true)`。
 
-**i18n.js**
+**src/i18n.js**
 
 - 新增键（zh/en 双语）：`toggleTerminal`（切换终端）、`terminalTitle`（终端）、`terminalExited`（进程已退出）、`terminalReopen`（重新打开）、`terminalHostFailed`（终端服务不可用）、`terminalHostFailedDetail`、`actionOpenTerminal`（打开终端）等。
 
 **package.json / electron-builder**
 
-- `files` 新增：`terminal.html`、`terminal-preload.js`、`pty-host.js`、`terminal-assets/*`。
+- `files` 新增：`src` 整目录（含 `src/terminal/panel/index.html`、`src/terminal/panel/preload.js`、`src/terminal/pty-host.js`、`src/terminal/panel/assets/*`）。
 - 方案 1 下无原生模块进 Electron，**不需要** `asarUnpack` / `npmRebuild`。
 
 ## 4. 测试与验证清单
 
-- `npm test`：为 `terminal-manager.js` 纯逻辑补单测——协议帧编解码（含 base64 多字节/中文）、面板 bounds 计算、shell 探测顺序、会话表状态机。
-- `node --check`：`pty-host.js`、`terminal-manager.js`、`terminal-preload.js`、`main.js`、`content-preload.js`。
+- `npm test`：为 `src/terminal/manager.js` 纯逻辑补单测——协议帧编解码（含 base64 多字节/中文）、面板 bounds 计算、shell 探测顺序、会话表状态机。
+- `node --check`：`src/terminal/pty-host.js`、`src/terminal/manager.js`、`src/terminal/panel/preload.js`、`src/main.js`、`src/preload.js`。
 - `npm start` 冒烟（每项手验）：
   1. `Ctrl+\`` 与「终端」按钮开/关面板，焦点来回切换正常；
   2. 窗口缩放/最大化/还原后面板尺寸与终端列宽正确（fit + resize 链路）；
@@ -244,7 +248,7 @@
 | 风险 | 应对 |
 |---|---|
 | Electron 43 的 `WebContentsView` 与主 webContents 的层级/焦点细节 | 首选方案；备选：无边框透明子窗口（overlay），语义基本一致但更重 |
-| xterm 静态资源 vendoring 的版本漂移 | `terminal-assets/` 内注释锁定版本，升级步骤写入文件头 |
+| xterm 静态资源 vendoring 的版本漂移 | `src/terminal/panel/assets/` 内注释锁定版本，升级步骤写入文件头 |
 | node-pty 依赖 npm 安装脚本与 allow-scripts 机制 | npm 11 会拦截安装脚本，自动安装器需预写 `allowScripts` 或安装后 `npm approve-scripts`（M1 已实测） |
 | `Ctrl+\`` 与 DSH 页面内快捷键冲突 | 冒烟验证，冲突则换 `Ctrl+Shift+\`` |
 | 面板覆盖 DSH 页面底部 | 已解决：`dsh:panel-inset` 给 DSH 布局框架注入底部 padding，滚动范围收束到面板上方；frame 观测失败时退化为覆盖式，行为不退化 |

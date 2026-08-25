@@ -3,7 +3,7 @@
   /**
    * 终端面板页面逻辑（多终端）：xterm 每个会话一个 pane，右侧管理区负责
    * 切换/重命名/关闭/新建。xterm 6 的 UMD 构建把导出展开到全局
-   * （Terminal/FitAddon/ClipboardAddon），由 terminal.html 以经典 <script> 引入。
+   * （Terminal/FitAddon/ClipboardAddon），由 index.html 以经典 <script> 引入。
    *
    * 注意：'use strict' 必须放在函数体内——沙箱渲染进程经自定义 scheme 加载
    * 经典脚本时，顶层指令会被当作表达式求值（实测报 "use strict" is not a
@@ -133,7 +133,7 @@
     stage.appendChild(pane)
 
     const viewport = document.createElement('div')
-    // 必须是「有确定高度」的 flex 容器（见 terminal.html 的 .term-pane/.xterm-host）
+    // 必须是「有确定高度」的 flex 容器（见 index.html 的 .term-pane/.xterm-host）
     viewport.className = 'xterm-host'
     pane.appendChild(viewport)
 
