@@ -137,9 +137,21 @@
     position: absolute;
     inset: 0;
     display: none;
+    /* flex 列布局：xterm 宿主容器（.xterm-host）拿到确定高度，
+       打破「裸 div 高度由 .xterm 内容撑起 → fit 读到的父高恒等于
+       xterm 自身高 → rows 永远算不回真实可视行数」的循环依赖
+       （实测症状：rows=24 而面板只有 11 行可视高，执行命令后新提示符
+       被画在裁剪区外，表现为「执行完命令没有新的输入行」） */
+    flex-direction: column;
     padding: 6px 0 0 8px;
   }
-  .term-pane.active { display: block; }
+  .term-pane.active { display: flex; }
+  .term-pane .xterm-host {
+    flex: 1 1 auto;
+    min-height: 0;
+    position: relative;
+    overflow: hidden;
+  }
   .term-pane .xterm { height: 100%; }
   .term-pane .xterm .xterm-viewport {
     scrollbar-width: thin;

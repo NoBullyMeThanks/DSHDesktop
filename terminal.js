@@ -133,6 +133,8 @@
     stage.appendChild(pane)
 
     const viewport = document.createElement('div')
+    // 必须是「有确定高度」的 flex 容器（见 terminal.html 的 .term-pane/.xterm-host）
+    viewport.className = 'xterm-host'
     pane.appendChild(viewport)
 
     const exitBar = document.createElement('div')
@@ -508,6 +510,39 @@
     panes: Array.from(panes.keys()),
     exited: Array.from(panes.values()).find((p) => p.sessionId === activeSessionId)?.exited === true,
   })
+  // 诊断用：xterm 尺寸与可视区几何（定位「执行命令后新行不可见」类问题）
+  window.__getTermDiagnostics = () => {
+    const entry = panes.get(activeSessionId)
+    if (!entry || !entry.term) return null
+    const term = entry.term
+    const buf = term.buffer.active
+    const paneRect = entry.pane.getBoundingClientRect()
+    const xtermEl = entry.pane.querySelector('.xterm')
+    const screenEl = entry.pane.querySelector('.xterm-screen')
+    const viewportEl = entry.pane.querySelector('.xterm-viewport')
+    const rectOf = (el) => el ? { w: Math.round(el.getBoundingClientRect().width), h: Math.round(el.getBoundingClientRect().height) } : null
+    return {
+      cols: term.cols,
+      rows: term.rows,
+      bufferLength: buf.length,
+      baseY: buf.baseY,
+      viewportY: buf.viewportY,
+      cursorY: buf.cursorY,
+      cursorX: buf.cursorX,
+      pane: rectOf(entry.pane),
+      xterm: rectOf(xtermEl),
+      screen: rectOf(screenEl),
+      viewport: viewportEl
+        ? {
+            ...rectOf(viewportEl),
+            clientH: viewportEl.clientHeight,
+            scrollH: viewportEl.scrollHeight,
+            scrollTop: Math.round(viewportEl.scrollTop),
+          }
+        : null,
+      stageH: Math.round(stage.getBoundingClientRect().height),
+    }
+  }
 
   setStatus(STR.connecting, 'busy')
   bridge.ready()
