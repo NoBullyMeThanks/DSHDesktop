@@ -82,6 +82,47 @@ test('假宿主：宿主退出后触发 onClosed 且请求报错', async () => {
   await assert.rejects(() => client.request('ping', {}, 500), /未运行|已退出/)
 })
 
+test('假宿主：stdin 流 EPIPE 拒绝在途请求且不向外传播为未捕获异常', async () => {
+  // 宿主进程死亡瞬间（Node 的 exit/close 事件尚未派发，alive 仍为 true），
+  // 主进程继续 write 时 stdin 会以异步 EPIPE 报错；如果没有流 error 监听器，
+  // 该错误会沿 EventEmitter 'error' 传播成进程级未捕获异常（用户实测：主进程
+  // 弹「Uncaught Exception: write EPIPE」错误框）。这里直接 emit error 事件
+  // 模拟管道断开：无监听器时 emit 本身同步抛出（测试失败），有监听器时
+  // 在途请求应被拒绝、错误不得传播。
+  const client = new TerminalHostClient({ executable: process.execPath, hostArgs: ['-e', 'setInterval(() => {}, 1000)'] })
+  let uncaught = 0
+  const onUncaught = () => { uncaught += 1 }
+  process.on('uncaughtException', onUncaught)
+  try {
+    await client.start()
+    const pendingReject = client.request('ping', {}, 10_000).then(
+      () => new Error('请求不应成功'),
+      (err) => err,
+    )
+    // 模拟宿主 stdin 管道断开（真实 EPIPE 也走这条 error 事件路径）
+    client.child.stdin.emit('error', Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }))
+    const err = await withTimeout(pendingReject, 5_000, '在途请求拒绝')
+    assert.match(err.message, /EPIPE/)
+    assert.equal(uncaught, 0, '流错误不得升级为进程级未捕获异常')
+    // 宿主随后真退出（killTree 触发真实 close）：后续请求应被拒绝，onClosed 正常触发
+    const closed = withTimeout(new Promise((resolve) => { client.onClosed = (code) => resolve(code) }), 5_000, 'onClosed')
+    client.killTree()
+    assert.equal(await closed, 1)
+    const err2 = await withTimeout(
+      client.request('ping', {}, 500).then(
+        () => new Error('请求不应成功'),
+        (e2) => e2,
+      ),
+      2_000,
+      '后续请求拒绝',
+    )
+    assert.match(err2.message, /未运行|已退出/)
+  } finally {
+    process.removeListener('uncaughtException', onUncaught)
+    if (client.alive) client.killTree()
+  }
+})
+
 test('假宿主：data/exit 事件按 sessionId 分发并解码 base64', async () => {
   const fakeHost = String.raw`const rl=require('readline').createInterface({input:process.stdin});rl.on('line',l=>{const j=JSON.parse(l);if(j.type==='spawn'){process.stdout.write(JSON.stringify({id:j.id,ok:true})+'\n');process.stdout.write(JSON.stringify({type:'data',sessionId:j.sessionId,data:Buffer.from('你好世界','utf8').toString('base64')})+'\n');process.stdout.write(JSON.stringify({type:'exit',sessionId:j.sessionId,code:0})+'\n')}else{process.stdout.write(JSON.stringify({id:j.id,ok:true})+'\n')}})`
   const client = new TerminalHostClient({ executable: process.execPath, hostArgs: ['-e', fakeHost] })

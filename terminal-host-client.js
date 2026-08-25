@@ -81,6 +81,13 @@ class TerminalHostClient {
       child.once('spawn', () => resolve())
       child.on('close', (code) => this.handleHostClose(code))
 
+      // 流错误必须显式监听：stdin 上出现 EPIPE（宿主已退出但 close 事件还没
+      // 派发，request 的同步 try/catch 拦不住异步 write 错误）会让错误走
+      // EventEmitter 'error' 传播，最终变成主进程未捕获异常弹窗。
+      child.stdin.on('error', (err) => this.handleStreamError('stdin', err))
+      child.stdout.on('error', (err) => this.handleStreamError('stdout', err))
+      child.stderr.on('error', (err) => this.handleStreamError('stderr', err))
+
       child.stderr.on('data', (d) => {
         const text = String(d)
         this.stderrBuffer += text
@@ -94,12 +101,31 @@ class TerminalHostClient {
 
   handleHostClose(code) {
     const error = new Error(`终端宿主进程已退出（code ${code}）`)
+    this.rejectPending(error)
+    if (this.onClosed) this.onClosed(code)
+  }
+
+  /** 拒绝并清空全部在途请求（宿主退出/流错误共用，重复调用幂等）。 */
+  rejectPending(error) {
     for (const entry of this.pending.values()) {
       clearTimeout(entry.timer)
       entry.reject(error)
     }
     this.pending.clear()
-    if (this.onClosed) this.onClosed(code)
+  }
+
+  /**
+   * 宿主子进程三个流（stdin/stdout/stderr）的异步错误统一入口：
+   * 只记录日志、不给事件传播机会；stdin 写入失败（EPIPE/流已销毁）说明
+   * 宿主这一侧已经没了，等同宿主退出——先拒绝在途请求，close 事件随后
+   * 到达时会再触发 onClosed（对 pending 的拒绝是幂等的）。
+   */
+  handleStreamError(streamName, err) {
+    const code = err && err.code ? `（${err.code}）` : ''
+    this.log(`终端宿主 ${streamName} 流错误${code}：${err && err.message ? err.message : err}`)
+    if (streamName === 'stdin' && err && (err.code === 'EPIPE' || err.code === 'ERR_STREAM_DESTROYED')) {
+      this.rejectPending(new Error(`终端宿主进程已退出：${err.message}`))
+    }
   }
 
   handleLine(line) {
