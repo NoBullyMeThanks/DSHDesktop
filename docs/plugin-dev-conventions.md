@@ -142,6 +142,15 @@ dsh --profile <测试profile> --dump-config
 发布到 npm 前按 `docs/user/develop/basic/publish.zh.md` 走：版本随官方线、
 `files` 裁剪、README 双语、LICENSE、`npm publish`（带 scope 需 `publishConfig.access: public`）。
 
+## 目录约定（本机规范）
+
+- **插件源码**：`<项目根>/plugin/<插件名>/`（host 包根目录，内含 `client/` 等子包）；
+  本机为 `E:\dsh-desktop\plugin\{workspace-file-tree,dsh-usage-monitor}`。
+- **发布产物**：`<项目根>/plugin/release/<tag>/`，由 `pnpm release` 默认输出
+  （`DSH_RELEASE_DIR` 可覆盖）；旧 `release-artifacts/` 约定已废弃。
+- 产物与 `node_modules/` 不提交（仓库根 `.gitignore` 已覆盖）；
+  打包发布细节见 [`docs/plugin-publish-guide.md`](plugin-publish-guide.md)。
+
 ## 验收清单（交付前逐项打勾）
 
 - [ ] `type: module`，`main`/`exports` 指向 `lib/index.js`

@@ -2,7 +2,7 @@
 
 ## 项目结构与模块组织
 
-本仓库是面向 Windows 的 Electron 启动器，采用 CommonJS。`main.js` 负责应用生命周期、透明原生 Window Controls Overlay、快捷键及 DSH 子进程；BrowserWindow 直接加载 DSH 页面，不另设自定义标题栏页面。`content-preload.js` 负责外观观测和应用内隔离模态框；`startup.html` 与 `startup-preload.js` 实现主页面加载前的启动窗口。`runtime-manager.js` 管理 `@deepseek-ai/dsh` 的安装和更新；`settings-reader.js`、`i18n.js`、`tray.js` 分别处理设置、文案和托盘。静态图标位于 `assets/`，打包结果写入 `dist/`；不要提交生成物或 `node_modules/`。
+本仓库是面向 Windows 的 Electron 启动器，采用 CommonJS。`main.js` 负责应用生命周期、透明原生 Window Controls Overlay、快捷键及 DSH 子进程；BrowserWindow 直接加载 DSH 页面，不另设自定义标题栏页面。`content-preload.js` 负责外观观测和应用内隔离模态框；`startup.html` 与 `startup-preload.js` 实现主页面加载前的启动窗口。`runtime-manager.js` 管理 `@deepseek-ai/dsh` 的安装和更新；`settings-reader.js`、`i18n.js`、`tray.js` 分别处理设置、文案和托盘。静态图标位于 `assets/`，打包结果写入 `dist/`；不要提交生成物或 `node_modules/`。本地 DSH 插件源码位于 `plugin/<插件名>/`（每个插件一个目录，内含 `client/` 子包），发布产物写入 `plugin/release/<tag>/`（均被 .gitignore 覆盖）；插件打包发布流程见 [`docs/plugin-publish-guide.md`](docs/plugin-publish-guide.md)。
 
 ## 构建、测试与开发命令
 

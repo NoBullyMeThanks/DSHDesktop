@@ -3,6 +3,8 @@ node_modules/
 dist/
 out/
 release/
+# 本地 DSH 插件:整体不入版本控制(源码/依赖/发布产物均留在本地)
+plugin/
 coverage/
 .nyc_output/
 .cache/
