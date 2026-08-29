@@ -806,21 +806,32 @@ async function checkForUpdates(manual) {
     return
   }
   if (updateCheckPromise) {
-    const currentCheck = updateCheckPromise
-    await currentCheck
-    if (updateCheckPromise === currentCheck) updateCheckPromise = null
-    if (isManual) return checkForUpdates(true)
+    // 在途检查若已弹过更新提示（用户在对话框中作答），手动请求不再重复触发检查，
+    // 避免「稍后」之后立刻又弹一次相同的提示。
+    let outcome = 'error'
+    try { outcome = await updateCheckPromise } catch (err) {
+      appendLog(`[update] 在途检查异常：${err && err.message ? err.message : err}`)
+    }
+    if (isManual && outcome !== 'prompted') return checkForUpdates(true)
     return
   }
 
   updateCheckPromise = performUpdateCheck(isManual)
   try {
     await updateCheckPromise
+  } catch (err) {
+    // 托盘点击不消费 Promise，这里兜底防止检查异常变成未捕获拒绝
+    appendLog(`[update] 检查失败：${err && err.message ? err.message : err}`)
   } finally {
     updateCheckPromise = null
   }
 }
 
+/**
+ * 执行一次更新检查（manual=false 为启动/后台自动检查）。
+ * 返回结果状态供 checkForUpdates 决定是否补一次手动检查：
+ * 'offline' 查询失败 | 'current' 已是最新 | 'deferred' 窗口不可见已暂存 | 'prompted' 已弹更新提示。
+ */
 async function performUpdateCheck(manual) {
   const installed = runtime.installedVersion()
   const checking = manual
@@ -837,7 +848,7 @@ async function performUpdateCheck(manual) {
 
   if (!latest) {
     appendLog('[update] npm registry unavailable')
-    if (!manual) return
+    if (!manual) return 'offline'
     checking.update({
       mode: 'error',
       title: t(locale, 'updateOfflineTitle'),
@@ -853,13 +864,13 @@ async function performUpdateCheck(manual) {
     })
     const action = await checking.result
     if (action === 'retry') return performUpdateCheck(true)
-    return
+    return 'offline'
   }
 
   const hasUpdate = !installed || runtime.compareVersions(latest, installed) > 0
   if (!hasUpdate) {
     setPendingUpdateVersion(null)
-    if (!manual) return
+    if (!manual) return 'current'
     checking.update({
       mode: 'info',
       title: t(locale, 'updateCurrentTitle'),
@@ -871,17 +882,18 @@ async function performUpdateCheck(manual) {
       buttons: [dialogButton('close', 'actionClose', 'primary')],
     })
     await checking.result
-    return
+    return 'current'
   }
 
   if (!manual && (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible())) {
     setPendingUpdateVersion(latest)
     appendLog(`[update] ${latest} available; prompt deferred until window is shown`)
-    return
+    return 'deferred'
   }
 
   checking?.close('continue')
   await promptUpdateVersion(latest)
+  return 'prompted'
 }
 
 function maybeCheckForUpdates() {
@@ -932,6 +944,14 @@ async function promptUpdateVersion(version) {
 function maybeShowPendingUpdate() {
   const version = updatePreferences.pendingUpdateVersion
   if (!version || pendingUpdatePrompting || activeAppDialog) return
+  if (updateCheckPromise) {
+    // 先等自动检查落地再提示：检查结果会把 pending 覆盖为当日最新版（或清空），
+    // 避免昨日的旧版本提示抢先弹出、并把当日最新版吞掉。
+    updateCheckPromise
+      .then(() => maybeShowPendingUpdate())
+      .catch((err) => appendLog(`[update] pending prompt deferred: ${err.message}`))
+    return
+  }
   promptUpdateVersion(version).catch((err) => appendLog(`[update] pending prompt failed: ${err.message}`))
 }
 
@@ -1145,7 +1165,7 @@ async function runStartupAttempt() {
 
     const hasRuntime = runtime.runtimeStatus().usable
     setSplashLoading(hasRuntime ? 'startupPrepareRuntime' : 'startupInstallRuntime')
-    const ensured = await runtime.ensureRuntime()
+    const ensured = await runtime.ensureRuntime({ log: appendLog })
     if (!ensured.ok) {
       appendLog(`[runtime] ensure failed: ${ensured.err ?? 'unknown error'}`)
       setSplashError(

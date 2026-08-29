@@ -12,6 +12,7 @@
 const os = require('node:os')
 const fs = require('node:fs')
 const path = require('node:path')
+const http = require('node:http')
 const https = require('node:https')
 const { spawn, spawnSync } = require('node:child_process')
 const semver = require('semver')
@@ -34,6 +35,10 @@ const REGISTRY_MIRROR_ALT = 'https://mirrors.cloud.tencent.com/npm/'
 const NPM_INSTALL_TIMEOUT_MS = 600000
 /** 单次 npm view 查询的硬超时（元数据请求应很快完成）。 */
 const NPM_VIEW_TIMEOUT_MS = 60000
+/** npm view 的每次网络请求超时：慢而可达的源不应让检查卡满硬超时。 */
+const NPM_VIEW_FETCH_TIMEOUT_MS = 20000
+/** npm view 的网络重试次数：直接失败换下一个源更划算。 */
+const NPM_VIEW_FETCH_RETRIES = 0
 /** npm 超时后等待进程树彻底退出的最长时间。 */
 const PROCESS_EXIT_TIMEOUT_MS = 10000
 
@@ -199,6 +204,8 @@ function stripTrailingSlash(url) {
 /**
  * 快速探测一个 registry 是否可达：GET <registry>/-/ping，默认 5 秒超时。
  * 任何 HTTP 响应（含 404）都视为可达；网络错误/超时视为不可达。
+ * 按 URL 协议选择 http/https：内网私有 registry 常用 http://（无 TLS），
+ * 不能用 https.get 请求 http URL，否则会被误判为不可达。
  */
 function probeRegistry(registryUrl, timeoutMs = 5000) {
   return new Promise((resolve) => {
@@ -206,7 +213,11 @@ function probeRegistry(registryUrl, timeoutMs = 5000) {
     const finish = (ok) => { if (!finished) { finished = true; resolve(ok) } }
     let req
     try {
-      req = https.get(`${stripTrailingSlash(registryUrl)}/-/ping`, { timeout: timeoutMs }, (res) => {
+      let protocol = 'https:'
+      try { protocol = new URL(registryUrl).protocol } catch {}
+      if (protocol !== 'https:' && protocol !== 'http:') return finish(false)
+      const mod = protocol === 'http:' ? http : https
+      req = mod.get(`${stripTrailingSlash(registryUrl)}/-/ping`, { timeout: timeoutMs }, (res) => {
         res.resume() // 读空响应体，释放连接
         finish(true)
       })
@@ -488,6 +499,59 @@ async function pickRegistries(options = {}) {
 }
 
 /**
+ * peer 补装阶段：循环补齐当前缺失的必需 peer，直至全部满足或无法再推进。
+ * 返回 `{ ok, status, err, terminal, unconfirmedExit }`：
+ * - ok=true：missingPeers 已清零，status 即最终状态；
+ * - unconfirmedExit=true：npm 未确认退出，调用方必须停止切源保护运行时目录；
+ * - terminal=true：与 registry 无关的确定性错误（版本范围无效），换源重试没有意义；
+ * - 其余 { ok:false, err }：瞬时性错误（npm 失败或换源仍缺），调用方可换源仅重试 peer 补装。
+ * attemptedPeers 每次调用独立：换源后允许对同一 peer 重新尝试。
+ */
+async function fixMissingPeers(initialStatus, { runtimeDir, log, onProgress, registry, commonArgs, runInstallAttempt }) {
+  let status = initialStatus
+  const attemptedPeers = new Set()
+  while (status.missingPeers.length > 0) {
+    const pendingPeers = status.missingPeers.filter((peer) => !attemptedPeers.has(peer.name))
+    if (pendingPeers.length === 0) {
+      // 补装命令本身成功了，但校验仍说缺失：多为镜像版本集滞后导致范围不满足，换源可解
+      const err = `npm 已完成，但仍缺少必需依赖：${status.missingPeers.map((peer) => peer.name).join('、')}`
+      log(`[install] peer dependency 修复失败：${err}`)
+      return { ok: false, status, err }
+    }
+    const invalidPeers = pendingPeers.filter((peer) => peer.invalidRange || (!peer.range && !peer.installRange))
+    if (invalidPeers.length > 0) {
+      const err = `必需 peer dependency 的版本范围无效：${invalidPeers.map((peer) => `${peer.name}（${peer.requiredBy}）`).join('、')}`
+      log(`[install] peer dependency 范围校验失败：${err}`)
+      return { ok: false, status, err, terminal: true }
+    }
+    for (const peer of pendingPeers) attemptedPeers.add(peer.name)
+    const peerSpecs = pendingPeers.map((peer) => `${peer.name}@${peer.range ?? peer.installRange}`)
+    log(`[install] 正在补装 ${pendingPeers.length} 个必需 peer dependency：${pendingPeers.map((peer) => peer.name).join('、')}`)
+    // peer 阶段不使用 legacy，让 npm 在较小的显式集合内选择互相兼容的版本；
+    // --no-save 避免把临时修复包固化为根依赖，影响后续更新。
+    const peerArgs = ['install', ...peerSpecs, ...commonArgs, '--no-save']
+    if (registry) peerArgs.push('--registry', registry)
+    const peerResult = await runInstallAttempt(peerArgs, {
+      cwd: runtimeDir,
+      timeoutMs: NPM_INSTALL_TIMEOUT_MS,
+      onData: onProgress,
+    })
+    if (!peerResult.ok) {
+      const err = errMsg(peerResult)
+      log(`[install] peer dependency 补装失败：${err}`)
+      return {
+        ok: false,
+        status,
+        err,
+        unconfirmedExit: peerResult.terminationUnconfirmed === true,
+      }
+    }
+    status = runtimeStatus(runtimeDir)
+  }
+  return { ok: true, status, err: '' }
+}
+
+/**
  * 安装指定版本（缺省 latest）。先探测可达源并按序尝试，每个源一次
  * npm install 尝试、带硬超时；全部失败返回最后一个错误。
  * 成功后记录已装版本。options 仅用于纯 Node 测试注入临时目录/版本文件/runner。
@@ -505,6 +569,17 @@ async function installVersion(version, options = {}) {
   // 当前已安装 DSH 的精确版本，离线启动不会被目标版本污染。
   const currentVersion = installedVersion(runtimeDir)
   writeManagedRuntimeManifest(runtimeDir, parseVersion(currentVersion) ? currentVersion : target)
+  if (options.force === true) {
+    // 修复模式：npm 对「包目录在但其中文件缺失」的损坏会报 up to date 而不恢复文件
+    //（实测：npm install <pkg>@同版本 --force 不重新解包），必须先删掉目标包目录，
+    // 强制 npm 重新解包后再走完整性校验与 peer 补齐。
+    try {
+      fs.rmSync(path.join(runtimeDir, 'node_modules', ...PKG_NAME.split('/')), { recursive: true, force: true })
+      log('[install] 修复模式：已清理损坏的 DSH 包目录，准备重新解包')
+    } catch (err) {
+      log(`[install] 修复模式：清理损坏包目录失败（继续安装）：${err.message}`)
+    }
+  }
   const spec = `${PKG_NAME}@${target}`
   const attempts = await pickRegistries(options)
   log(`[install] 目标 ${spec}，将按序尝试：${attempts.map(sourceName).join(' → ')}`)
@@ -527,74 +602,71 @@ async function installVersion(version, options = {}) {
     log('[install] 元数据缓存过期导致"版本不存在"，强制重新校验后重试…')
     return runner(npmCommand(), args.map((a) => (a === '--prefer-offline' ? '--prefer-online' : a)), runOpts)
   }
-  for (const attempt of attempts) {
-    const args = [
-      'install', spec,
-      ...commonArgs,
-      // 主包的大依赖树必须跳过 peer 自动解析，避免 npm 11 卡在 idealTree；
-      // 缺失 peer 会在下一阶段用一个规模更小的正常解析单独补齐。
-      '--legacy-peer-deps',
-    ]
-    if (options.force === true) args.push('--force')
-    if (attempt.registry) args.push('--registry', attempt.registry)
-    log(`[install] 正在从 ${sourceName(attempt)} 安装…`)
-    const res = await runInstallAttempt(args, {
-      cwd: runtimeDir,
-      timeoutMs: NPM_INSTALL_TIMEOUT_MS,
-      onData: onProgress,
-    })
-    if (!res.ok) {
-      lastErr = errMsg(res)
-      log(`[install] 源 ${sourceName(attempt)} 失败：${lastErr}`)
-      if (res.terminationUnconfirmed) {
-        return stopForUnconfirmedExit(lastErr)
-      }
-      continue
-    }
-    let status = runtimeStatus(runtimeDir)
-    if (!parseVersion(status.version) || !status.hasBin) {
-      log('[install] 完整性校验失败')
-      return { ok: false, err: `npm 安装完成，但 DSH 运行时完整性校验失败：${binPath(runtimeDir)}` }
-    }
-    writeManagedRuntimeManifest(runtimeDir, status.version)
-    const attemptedPeers = new Set()
-    while (status.missingPeers.length > 0) {
-      const pendingPeers = status.missingPeers.filter((peer) => !attemptedPeers.has(peer.name))
-      if (pendingPeers.length === 0) {
-        lastErr = `npm 已完成，但仍缺少必需依赖：${status.missingPeers.map((peer) => peer.name).join('、')}`
-        log(`[install] peer dependency 修复失败：${lastErr}`)
-        break
-      }
-      const invalidPeers = pendingPeers.filter((peer) => peer.invalidRange || (!peer.range && !peer.installRange))
-      if (invalidPeers.length > 0) {
-        lastErr = `必需 peer dependency 的版本范围无效：${invalidPeers.map((peer) => `${peer.name}（${peer.requiredBy}）`).join('、')}`
-        log(`[install] peer dependency 范围校验失败：${lastErr}`)
-        break
-      }
-      for (const peer of pendingPeers) attemptedPeers.add(peer.name)
-      const peerSpecs = pendingPeers.map((peer) => `${peer.name}@${peer.range ?? peer.installRange}`)
-      log(`[install] 正在补装 ${pendingPeers.length} 个必需 peer dependency：${pendingPeers.map((peer) => peer.name).join('、')}`)
-      // peer 阶段不使用 legacy，让 npm 在较小的显式集合内选择互相兼容的版本；
-      // --no-save 避免把临时修复包固化为根依赖，影响后续更新。
-      const peerArgs = ['install', ...peerSpecs, ...commonArgs, '--no-save']
-      if (attempt.registry) peerArgs.push('--registry', attempt.registry)
-      const peerResult = await runInstallAttempt(peerArgs, {
+  // 主包安装成功后不再因 peer 补装失败而换源重装主包：
+  // 确定性错误（范围无效）立即返回，瞬时错误仅由后续源重试 peer 补装。
+  let mainInstalled = false
+  for (let i = 0; i < attempts.length; i++) {
+    const attempt = attempts[i]
+    let status
+    if (!mainInstalled) {
+      const args = [
+        'install', spec,
+        ...commonArgs,
+        // 主包的大依赖树必须跳过 peer 自动解析，避免 npm 11 卡在 idealTree；
+        // 缺失 peer 会在下一阶段用一个规模更小的正常解析单独补齐。
+        '--legacy-peer-deps',
+      ]
+      if (options.force === true) args.push('--force')
+      if (attempt.registry) args.push('--registry', attempt.registry)
+      log(`[install] 正在从 ${sourceName(attempt)} 安装…`)
+      const res = await runInstallAttempt(args, {
         cwd: runtimeDir,
         timeoutMs: NPM_INSTALL_TIMEOUT_MS,
         onData: onProgress,
       })
-      if (!peerResult.ok) {
-        lastErr = errMsg(peerResult)
-        log(`[install] peer dependency 补装失败：${lastErr}`)
-        if (peerResult.terminationUnconfirmed) {
+      if (!res.ok) {
+        lastErr = errMsg(res)
+        log(`[install] 源 ${sourceName(attempt)} 失败：${lastErr}`)
+        if (res.terminationUnconfirmed) {
           return stopForUnconfirmedExit(lastErr)
         }
-        break
+        continue
       }
       status = runtimeStatus(runtimeDir)
+      if (!parseVersion(status.version) || !status.hasBin) {
+        log('[install] 完整性校验失败')
+        return { ok: false, err: `npm 安装完成，但 DSH 运行时完整性校验失败：${binPath(runtimeDir)}` }
+      }
+      writeManagedRuntimeManifest(runtimeDir, status.version)
+      mainInstalled = true
+    } else {
+      // 上一源主包已装好，只是 peer 补装瞬时失败：换源后只补 peer，不再重装主包
+      status = runtimeStatus(runtimeDir)
     }
-    if (!status.usable) continue
-    const newVer = status.version
+    const fix = await fixMissingPeers(status, {
+      runtimeDir,
+      log,
+      onProgress,
+      registry: attempt.registry,
+      commonArgs,
+      runInstallAttempt,
+    })
+    if (!fix.ok) {
+      lastErr = fix.err
+      if (fix.unconfirmedExit) return stopForUnconfirmedExit(lastErr)
+      if (fix.terminal) {
+        // 版本范围无效等与源无关的确定性错误：换源重试没有意义，立即返回真实原因
+        return { ok: false, err: lastErr }
+      }
+      if (i === attempts.length - 1) break
+      log(`[install] 源 ${sourceName(attempt)} peer 补装失败，下一源仅重试 peer 补装`)
+      continue
+    }
+    if (!fix.status.usable) {
+      lastErr = `npm 已完成，但运行时仍不可用：${fix.status.missingPeers.map((peer) => peer.name).join('、')}`
+      return { ok: false, err: lastErr }
+    }
+    const newVer = fix.status.version
     if (newVer) {
       writeVersionFile({ installed: newVer }, versionFile)
     }
@@ -616,7 +688,14 @@ async function ensureRuntime(options = {}) {
   const status = runtimeStatus(runtimeDir)
   if (status.usable) return { ok: true, version: status.version, repaired: false }
   const target = parseVersion(status.version) ? status.version : 'latest'
-  const result = await installer(target, { force: target !== 'latest' })
+  // 必须把 runtimeDir/versionFile/log 透传给 installer：否则纯 Node 测试注入的
+  // 临时目录会被忽略（修复会打到真实运行时目录），真实安装日志也会丢失。
+  const result = await installer(target, {
+    force: target !== 'latest',
+    runtimeDir,
+    versionFile: options.versionFile,
+    log: options.log,
+  })
   return { ...result, repaired: target !== 'latest' }
 }
 
@@ -634,7 +713,11 @@ async function latestVersion(options = {}) {
   const attempts = await pickRegistries(options)
   for (const attempt of attempts) {
     log(`[view] 正在从 ${sourceName(attempt)} 查询最新版本…`)
-    const args = ['view', PKG_NAME, 'dist-tags', '--json']
+    const args = [
+      'view', PKG_NAME, 'dist-tags', '--json',
+      // 与 install 一致地限制网络行为：慢而可达的源最多等这次超时，直接换下一个源
+      `--fetch-timeout=${NPM_VIEW_FETCH_TIMEOUT_MS}`, `--fetch-retries=${NPM_VIEW_FETCH_RETRIES}`,
+    ]
     if (attempt.registry) args.push('--registry', attempt.registry)
     const res = await runner(npmCommand(), args, { timeoutMs: NPM_VIEW_TIMEOUT_MS })
     if (res.ok) {
@@ -737,6 +820,7 @@ module.exports = {
   isNotFoundError,
   registryAttempts,
   pickRegistries,
+  probeRegistry,
   nodeVersion,
   nodeIsAvailable,
 }

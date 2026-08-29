@@ -3,6 +3,7 @@
 const test = require('node:test')
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
+const http = require('node:http')
 const os = require('node:os')
 const path = require('node:path')
 const runtime = require('../src/runtime-manager.js')
@@ -208,7 +209,8 @@ test('入口缺失时重装当前精确版本', async (t) => {
     installer: async (version, options) => { target = version; installOptions = options; return { ok: true, version } },
   })
   assert.equal(target, '1.2.3')
-  assert.deepEqual(installOptions, { force: true })
+  assert.equal(installOptions.force, true)
+  assert.equal(installOptions.runtimeDir, runtimeDir)
   assert.equal(result.repaired, true)
 })
 
@@ -219,7 +221,8 @@ test('无法识别版本时安装 latest', async (t) => {
     runtimeDir,
     installer: async (version, options) => {
       target = version
-      assert.deepEqual(options, { force: false })
+      assert.equal(options.force, false)
+      assert.equal(options.runtimeDir, runtimeDir)
       return { ok: true, version: '2.0.0' }
     },
   })
@@ -482,6 +485,157 @@ test('installVersion 官方源不可达时直达镜像源', async (t) => {
   assert.ok(calls[1].includes(runtime.REGISTRY_MIRROR))
   const vf = JSON.parse(fs.readFileSync(versionFile, 'utf8'))
   assert.equal(vf.installed, '1.2.3')
+})
+
+
+test('installVersion 修复模式先删除损坏包目录，让 npm 真正重新解包', async (t) => {
+  const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dshdesktop-runtime-'))
+  const versionFile = path.join(runtimeDir, 'version.json')
+  const packageDir = path.join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh')
+  // 包目录在（package.json 完好）但 bin.js 缺失：npm install 同版本 --force 不会恢复文件，
+  // 修复模式必须先删掉包目录强制重新解包
+  fs.mkdirSync(path.join(packageDir, 'lib'), { recursive: true })
+  fs.writeFileSync(path.join(packageDir, 'package.json'), JSON.stringify({ version: '1.2.3' }))
+  t.after(() => fs.rmSync(runtimeDir, { recursive: true, force: true }))
+  let dirSeenRemoved = null
+  const runner = async (cmd, args) => {
+    if (args[0] === 'config') return { ok: true, code: 0, out: 'https://registry.npmjs.org/\n' }
+    // 断言：npm 安装开始时损坏包目录已被前置清理；随后模拟 npm 重新解包成功
+    dirSeenRemoved = !fs.existsSync(packageDir)
+    fs.mkdirSync(path.join(packageDir, 'lib'), { recursive: true })
+    fs.writeFileSync(path.join(packageDir, 'package.json'), JSON.stringify({ version: '1.2.3' }))
+    fs.writeFileSync(path.join(packageDir, 'lib', 'bin.js'), '')
+    return { ok: true, code: 0 }
+  }
+  const result = await runtime.installVersion('1.2.3', {
+    runtimeDir,
+    versionFile,
+    runner,
+    probe: async () => true,
+    force: true,
+  })
+  assert.equal(result.ok, true)
+  assert.equal(result.version, '1.2.3')
+  assert.equal(dirSeenRemoved, true)
+  assert.equal(runtime.runtimeStatus(runtimeDir).usable, true)
+})
+
+test('peer 补装瞬时失败时换源仅重试 peer，不重装主包', async (t) => {
+  const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dshdesktop-runtime-'))
+  const versionFile = path.join(runtimeDir, 'version.json')
+  const dshDir = path.join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh')
+  const bootDir = path.join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh-app-boot')
+  fs.mkdirSync(path.join(dshDir, 'lib'), { recursive: true })
+  fs.mkdirSync(bootDir, { recursive: true })
+  fs.writeFileSync(path.join(dshDir, 'package.json'), JSON.stringify({ version: '1.2.3' }))
+  fs.writeFileSync(path.join(dshDir, 'lib', 'bin.js'), '')
+  fs.writeFileSync(path.join(bootDir, 'package.json'), JSON.stringify({
+    name: '@deepseek-ai/dsh-app-boot',
+    version: '1.2.3',
+    peerDependencies: { '@deepseek-ai/cordis-plugin-group': '^1.0.1' },
+  }))
+  t.after(() => fs.rmSync(runtimeDir, { recursive: true, force: true }))
+  const calls = []
+  const runner = async (cmd, args) => {
+    if (args[0] === 'config') return { ok: true, code: 0, out: 'https://registry.npmjs.org/\n' }
+    calls.push(args)
+    if (args.some((arg) => arg.startsWith('@deepseek-ai/cordis-plugin-group@'))) {
+      // 官方源 peer 补装瞬时失败；镜像源成功（模拟镜像版本集滞后/网络抖动场景）
+      if (args.includes('https://registry.npmjs.org/')) {
+        return { ok: false, code: 1, err: 'npm error code ECONNREFUSED 模拟 peer 瞬时失败' }
+      }
+      const peerDir = path.join(runtimeDir, 'node_modules', '@deepseek-ai', 'cordis-plugin-group')
+      fs.mkdirSync(peerDir, { recursive: true })
+      fs.writeFileSync(path.join(peerDir, 'package.json'), JSON.stringify({
+        name: '@deepseek-ai/cordis-plugin-group',
+        version: '1.0.1',
+      }))
+      return { ok: true, code: 0 }
+    }
+    return { ok: true, code: 0 } // 主包安装
+  }
+  const result = await runtime.installVersion('1.2.3', { runtimeDir, versionFile, runner, probe: async () => true })
+  assert.equal(result.ok, true)
+  assert.equal(result.version, '1.2.3')
+  const mainCalls = calls.filter((args) => args[1] === '@deepseek-ai/dsh@1.2.3')
+  const peerCalls = calls.filter((args) => args.some((arg) => arg.startsWith('@deepseek-ai/cordis-plugin-group@')))
+  assert.equal(mainCalls.length, 1) // 主包只装一次，不再随 peer 失败重装
+  assert.equal(peerCalls.length, 2) // 官方源失败 1 次 + 镜像源成功 1 次
+  assert.equal(runtime.runtimeStatus(runtimeDir).usable, true)
+})
+
+test('peer 版本范围无效时立即失败，不再换源重装主包', async (t) => {
+  const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dshdesktop-runtime-'))
+  const versionFile = path.join(runtimeDir, 'version.json')
+  const dshDir = path.join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh')
+  const consumerDir = path.join(runtimeDir, 'node_modules', 'consumer')
+  fs.mkdirSync(path.join(dshDir, 'lib'), { recursive: true })
+  fs.mkdirSync(consumerDir, { recursive: true })
+  fs.writeFileSync(path.join(dshDir, 'package.json'), JSON.stringify({ version: '1.2.3' }))
+  fs.writeFileSync(path.join(dshDir, 'lib', 'bin.js'), '')
+  fs.writeFileSync(path.join(consumerDir, 'package.json'), JSON.stringify({
+    name: 'consumer',
+    version: '1.0.0',
+    peerDependencies: { 'peer-package': 'not-a-range@@' },
+  }))
+  t.after(() => fs.rmSync(runtimeDir, { recursive: true, force: true }))
+  const calls = []
+  const runner = async (cmd, args) => {
+    if (args[0] === 'config') return { ok: true, code: 0, out: 'https://registry.npmjs.org/\n' }
+    calls.push(args)
+    return { ok: true, code: 0 }
+  }
+  const result = await runtime.installVersion('1.2.3', { runtimeDir, versionFile, runner, probe: async () => true })
+  assert.equal(result.ok, false)
+  assert.match(result.err, /范围无效/)
+  assert.equal(calls.length, 1) // 只尝试官方源一次（config 未计入 calls），不进入下一源
+})
+
+test('所有源 peer 补装失败时报具体原因且主包只装一次', async (t) => {
+  const runtimeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dshdesktop-runtime-'))
+  const versionFile = path.join(runtimeDir, 'version.json')
+  const dshDir = path.join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh')
+  const bootDir = path.join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh-app-boot')
+  fs.mkdirSync(path.join(dshDir, 'lib'), { recursive: true })
+  fs.mkdirSync(bootDir, { recursive: true })
+  fs.writeFileSync(path.join(dshDir, 'package.json'), JSON.stringify({ version: '1.2.3' }))
+  fs.writeFileSync(path.join(dshDir, 'lib', 'bin.js'), '')
+  fs.writeFileSync(path.join(bootDir, 'package.json'), JSON.stringify({
+    name: '@deepseek-ai/dsh-app-boot',
+    version: '1.2.3',
+    peerDependencies: { '@deepseek-ai/cordis-plugin-group': '^1.0.1' },
+  }))
+  t.after(() => fs.rmSync(runtimeDir, { recursive: true, force: true }))
+  const calls = []
+  const runner = async (cmd, args) => {
+    if (args[0] === 'config') return { ok: true, code: 0, out: 'https://registry.npmjs.org/\n' }
+    calls.push(args)
+    if (args.some((arg) => arg.startsWith('@deepseek-ai/cordis-plugin-group@'))) {
+      return { ok: false, code: 1, err: 'npm error code ETARGET peer 版本不存在(模拟镜像未同步)' }
+    }
+    return { ok: true, code: 0 }
+  }
+  const result = await runtime.installVersion('1.2.3', { runtimeDir, versionFile, runner, probe: async () => true })
+  assert.equal(result.ok, false)
+  assert.match(result.err, /peer 版本不存在/)
+  const mainCalls = calls.filter((args) => args[1] === '@deepseek-ai/dsh@1.2.3')
+  const peerCalls = calls.filter((args) => args.some((arg) => arg.startsWith('@deepseek-ai/cordis-plugin-group@')))
+  assert.equal(mainCalls.length, 1) // 主包只装一次，不再随 peer 失败重装
+  assert.equal(peerCalls.length, 3) // 三个源各补一次
+})
+
+test('probeRegistry 支持 http 协议并拒绝其他协议', async () => {
+  const server = http.createServer((req, res) => res.end('ok'))
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const port = server.address().port
+    assert.equal(await runtime.probeRegistry('http://127.0.0.1:' + port + '/', 3000), true)
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+  assert.equal(await runtime.probeRegistry('ftp://127.0.0.1/'), false)
+  assert.equal(await runtime.probeRegistry('not-a-url'), false)
+  assert.equal(await runtime.probeRegistry('https://127.0.0.1:1/'), false)
 })
 
 test('latestVersion 官方源不可达时直达镜像源', async () => {
