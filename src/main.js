@@ -175,7 +175,8 @@ function createSplash() {
     resizable: false,
     maximizable: false,
     minimizable: false,
-    alwaysOnTop: true,
+    // 启动画面是启动期唯一可见的应用窗口（主窗口 reveal 前 show:false），
+    // 不需要系统级置顶：alwaysOnTop 会让它盖住其他所有应用窗口、无法被遮挡。
     center: true,
     backgroundColor: '#00000000',
     webPreferences: {
