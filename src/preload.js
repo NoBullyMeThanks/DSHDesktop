@@ -201,7 +201,9 @@ function ensureDialogUi() {
         border-color: color-mix(in srgb, var(--dsw-alias-label-error, #d64545) 55%, transparent);
       }
       button:disabled { opacity: 0.55; cursor: default; }
-      button:focus-visible, .dialog:focus-visible {
+      // 键盘焦点指示只画在可交互按钮上；容器卡片（.dialog）承担焦点锁定时
+      // 不显示描边，避免整张小窗边缘出现蓝色 outline。
+      button:focus-visible {
         outline: 2px solid var(--dsw-alias-border-focus, #4d6bfe);
         outline-offset: 2px;
       }
@@ -473,9 +475,17 @@ function handleDialogKeydown(event) {
   }
 
   if (event.key !== 'Tab') return
-  const focusable = [...dialogRoot.querySelectorAll('button:not(:disabled), [tabindex="-1"]')]
+  // 卡片容器（tabindex=-1）仅作初始聚焦回退，不进入 Tab 循环：
+  // 避免焦点循环经卡片时给整张小窗画出蓝色焦点描边
+  const focusable = [...dialogRoot.querySelectorAll('button:not(:disabled)')]
     .filter((element) => !element.hidden && getComputedStyle(element).display !== 'none')
-  if (focusable.length === 0) return
+  if (focusable.length === 0) {
+    // 无按钮模态（loading/progress）：拦截 Tab 防止焦点逃逸到背景，保持焦点锁定在卡片上
+    event.preventDefault()
+    event.stopImmediatePropagation()
+    dialogRoot.querySelector('.dialog').focus()
+    return
+  }
   const current = dialogRoot.activeElement
   let index = focusable.indexOf(current)
   index = event.shiftKey
