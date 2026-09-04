@@ -37,6 +37,17 @@ function createTray(controller, locale) {
         checked: controller.startupUpdateCheckEnabled(),
         click: (item) => controller.setStartupUpdateCheckEnabled(item.checked),
       },
+      {
+        label: t(locale, 'followGithubRelease'),
+        type: 'checkbox',
+        checked: controller.followGithubReleasesEnabled(),
+        click: (item) => controller.setFollowGithubReleasesEnabled(item.checked),
+      },
+      {
+        label: t(locale, 'rollbackToNpm'),
+        enabled: !runtimeBusy && controller.rollbackToNpmEnabled(),
+        click: () => controller.rollbackToNpm(),
+      },
       { label: t(locale, 'openInBrowser'), click: () => controller.openInBrowser() },
       { label: t(locale, 'actionOpenTerminal'), click: () => controller.openTerminal() },
       { type: 'separator' },
@@ -60,6 +71,10 @@ function createTray(controller, locale) {
     setLocale: rebuild,
     setRuntimeBusy(busy) {
       runtimeBusy = busy === true
+      rebuild(locale)
+    },
+    /** 菜单依赖的运行时状态变化（如版本来源切换）后重建菜单。 */
+    refresh() {
       rebuild(locale)
     },
     destroy: () => { tray.destroy() },

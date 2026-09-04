@@ -70,6 +70,11 @@ function ensureDialogUi() {
         -webkit-backdrop-filter: blur(var(--dsw-mask-blur, 4px));
         -webkit-app-region: no-drag;
       }
+      .backdrop[data-draggable='true'] {
+        /* 进度弹窗的遮罩是窗口拖动区：按住卡片外的空白处即可拖动大窗，
+           不会像「点击即取消」那样误中止正在进行的安装/更新。 */
+        -webkit-app-region: drag;
+      }
       .dialog {
         position: relative;
         width: min(420px, calc(100vw - 48px));
@@ -84,6 +89,9 @@ function ensureDialogUi() {
         outline: none;
         transform-origin: center;
         animation: enter 150ms ease-out;
+        /* 卡片本体必须是 no-drag：父级遮罩在 progress 模式下是拖动区，
+           否则按下卡片会误触发窗口拖动。 */
+        -webkit-app-region: no-drag;
       }
       .head {
         display: flex;
@@ -263,6 +271,9 @@ function ensureDialogUi() {
 
   dialogRoot.querySelector('.close').addEventListener('click', () => sendDialogAction(activeDialogState?.cancelAction))
   dialogRoot.querySelector('.backdrop').addEventListener('mousedown', (event) => {
+    // progress 模式的遮罩是窗口拖动区（data-draggable），且取消只走按钮/Esc：
+    // 用户按住遮罩拖动窗口时不能被误判为「点击遮罩取消」。
+    if (activeDialogState?.mode === 'progress') return
     if (event.target === event.currentTarget && activeDialogState?.cancelable) {
       sendDialogAction(activeDialogState.cancelAction)
     }
@@ -400,6 +411,7 @@ function renderDialog(state) {
   dialogActionPending = false
 
   const dialog = dialogRoot.querySelector('.dialog')
+  const backdrop = dialogRoot.querySelector('.backdrop')
   const indicator = dialogRoot.querySelector('.indicator')
   const title = dialogRoot.querySelector('h2')
   const message = dialogRoot.querySelector('.message')
@@ -407,6 +419,7 @@ function renderDialog(state) {
   const close = dialogRoot.querySelector('.close')
   const actions = dialogRoot.querySelector('.actions')
 
+  backdrop.dataset.draggable = state.mode === 'progress' ? 'true' : 'false'
   indicator.dataset.mode = state.mode
   title.textContent = state.title
   message.textContent = state.message
@@ -994,6 +1007,35 @@ function scheduleLayoutUpdate() {
   requestAnimationFrame(updateLayout)
 }
 
+/**
+ * body 子级被 DSH 的重渲染清空时，把注入的固定层重新挂回。
+ * 同一节点重新 append 不会重建 Shadow DOM 内容（弹窗状态原样保留），
+ * 因此窗口拖动触发布局断点切换、body 被整体重建时，更新弹窗立即恢复可见。
+ */
+function reconcileInjectedHosts() {
+  if (!document.body) return
+  let reappended = false
+  if (dialogHost && !dialogHost.isConnected) {
+    document.body.appendChild(dialogHost)
+    reappended = true
+  }
+  if (windowControlsHost && !windowControlsHost.isConnected) {
+    document.body.appendChild(windowControlsHost)
+    reappended = true
+  }
+  if (dragStripHost && !dragStripHost.isConnected) {
+    document.body.appendChild(dragStripHost)
+    reappended = true
+  }
+  if (reappended) ipcRenderer.send('dsh:dialog-event', 'hosts-reappended')
+}
+
+/** 独立定时看门狗：MutationObserver 回调与页面重渲染之间可能存在竞态
+ * （应用在观察回调之后再次清空子级），定时复查保证注入层最终一定挂回页面。 */
+function startHostWatchdog() {
+  setInterval(reconcileInjectedHosts, 750)
+}
+
 function start() {
   ensureDragStyle()
   ensureDragStrip()
@@ -1004,6 +1046,7 @@ function start() {
   const mutationObserver = new MutationObserver(() => {
     // 隔离 UI 的 Shadow DOM 变更不进入页面观察范围，不会触发自激。
     if (!frame || !frame.isConnected || !sidebar || !sidebar.isConnected) observeLayout(findFrame())
+    reconcileInjectedHosts()
     scheduleLayoutUpdate()
   })
   mutationObserver.observe(document.documentElement, {
@@ -1013,6 +1056,7 @@ function start() {
     attributeFilter: ['class', 'style', 'data-ds-dark-theme', 'data-sidebar-collapsed'],
   })
   window.addEventListener('resize', scheduleLayoutUpdate)
+  startHostWatchdog()
   scheduleLayoutUpdate()
 }
 

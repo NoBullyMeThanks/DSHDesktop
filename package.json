@@ -1,6 +1,6 @@
 {
   "name": "dshdesktop",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "description": "默认跟随 DeepSeek 官方最新版的 DSH 桌面启动器",
   "main": "src/main.js",
   "private": true,
@@ -35,8 +35,18 @@
     "win": {
       "icon": "assets/icon.ico",
       "target": [
-        { "target": "nsis", "arch": ["x64"] },
-        { "target": "portable", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
       ]
     },
     "nsis": {
@@ -50,6 +60,7 @@
     }
   },
   "dependencies": {
-    "semver": "^7.8.5"
+    "semver": "^7.8.5",
+    "tar": "^6.2.1"
   }
 }

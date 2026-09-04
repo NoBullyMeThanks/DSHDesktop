@@ -465,6 +465,16 @@ function writeVersionFile(data, versionFile = VERSION_FILE) {
   fs.writeFileSync(versionFile, JSON.stringify(data, null, 2) + '\n')
 }
 
+/** 读取版本记录文件（损坏/缺失返回 null）。 */
+function readVersionFile(versionFile = VERSION_FILE) {
+  try {
+    const data = JSON.parse(fs.readFileSync(versionFile, 'utf8'))
+    return data && typeof data === 'object' ? data : null
+  } catch {
+    return null
+  }
+}
+
 /** 把显式传入的 registry 列表映射成尝试项；未传时返回空数组。 */
 function registryAttempts(options = {}) {
   return (options.registries ?? []).map((r) => ({ registry: r || null }))
@@ -732,6 +742,44 @@ async function latestVersion(options = {}) {
   return null
 }
 
+/**
+ * 判断某个精确版本当前是否已发布到 npm registry（多源按序查询）。
+ * 任何源查询失败都视为「未发布」；调用方据此决定走 npm 安装还是 GitHub 源码构建。
+ * options 仅用于纯 Node 测试注入 runner/registries。
+ */
+async function npmHasVersion(version, options = {}) {
+  if (!parseVersion(version)) return false
+  const runner = options.runner ?? run
+  const attempts = await pickRegistries(options)
+  for (const attempt of attempts) {
+    const args = [
+      'view', `${PKG_NAME}@${version}`, 'version', '--json',
+      `--fetch-timeout=${NPM_VIEW_FETCH_TIMEOUT_MS}`, `--fetch-retries=${NPM_VIEW_FETCH_RETRIES}`,
+    ]
+    if (attempt.registry) args.push('--registry', attempt.registry)
+    const res = await runner(npmCommand(), args, { timeoutMs: NPM_VIEW_TIMEOUT_MS })
+    if (res.ok) {
+      const reported = parsePlainJsonString(res.out)
+      if (reported === version) return true
+    }
+  }
+  return false
+}
+
+/** 解析 npm view --json 输出的纯 JSON 字符串（如 `"0.1.2-alpha.1"`）；失败返回 null。 */
+function parsePlainJsonString(out) {
+  if (typeof out !== 'string') return null
+  const start = out.indexOf('"')
+  const end = out.lastIndexOf('"')
+  if (start === -1 || end <= start) return null
+  try {
+    const parsed = JSON.parse(out.slice(start, end + 1))
+    return typeof parsed === 'string' ? parsed : null
+  } catch {
+    return null
+  }
+}
+
 /** 从 npm view --json 的 stdout 中解析 dist-tags 对象；失败返回 null。 */
 function parseDistTags(out) {
   if (typeof out !== 'string') return null
@@ -809,9 +857,14 @@ module.exports = {
   installVersion,
   installedVersion,
   latestVersion,
+  npmHasVersion,
+  parsePlainJsonString,
   binPath,
   runtimeStatus,
   missingRequiredPeers,
+  fixMissingPeers,
+  writeVersionFile,
+  readVersionFile,
   isFrontendOnlyPeer,
   compareVersions,
   parseVersion,

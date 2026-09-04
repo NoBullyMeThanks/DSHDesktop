@@ -732,3 +732,53 @@ test('migrateLegacyBaseDir 迁移失败时返回 failed 且不抛异常', (t) =>
   }), 'failed')
   assert.equal(fs.existsSync(legacyDir), true)
 })
+
+test('npmHasVersion 在 registry 上命中精确版本', async () => {
+  const calls = []
+  const runner = async (cmd, args) => {
+    calls.push(args)
+    if (args[0] === 'config') return { ok: true, code: 0, out: 'https://registry.npmjs.org/\n' }
+    if (args[0] === 'view') return { ok: true, code: 0, out: '"0.1.1-rc.2"\n' }
+    return { ok: false, code: 1 }
+  }
+  const result = await runtime.npmHasVersion('0.1.1-rc.2', { runner, probe: async () => true })
+  assert.equal(result, true)
+  assert.ok(calls.some((args) => args.includes('@deepseek-ai/dsh@0.1.1-rc.2')))
+})
+
+test('npmHasVersion 未发布或查询失败时返回 false', async () => {
+  const runner = async (cmd, args) => {
+    if (args[0] === 'config') return { ok: true, code: 0, out: 'https://registry.npmjs.org/\n' }
+    return { ok: false, code: 1, err: 'npm error code E404\nnotarget' }
+  }
+  assert.equal(await runtime.npmHasVersion('0.1.2-alpha.1', { runner, probe: async () => true }), false)
+})
+
+test('npmHasVersion 异常 JSON 输出视为未发布', async () => {
+  const runner = async (cmd, args) => {
+    if (args[0] === 'config') return { ok: true, code: 0, out: 'https://registry.npmjs.org/\n' }
+    return { ok: true, code: 0, out: '{}\n' }
+  }
+  assert.equal(await runtime.npmHasVersion('0.1.1-rc.2', { runner, probe: async () => true }), false)
+})
+
+test('npmHasVersion 拒绝无效版本且不发起查询', async () => {
+  const calls = []
+  const result = await runtime.npmHasVersion('latest', {
+    runner: async (cmd, args) => { calls.push(args); return { ok: false, code: 1 } },
+    probe: async () => true,
+  })
+  assert.equal(result, false)
+  assert.equal(calls.length, 0)
+})
+
+test('readVersionFile 读取版本记录，损坏/缺失返回 null', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dshdesktop-version-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const file = path.join(dir, 'version.json')
+  assert.equal(runtime.readVersionFile(file), null)
+  fs.writeFileSync(file, '{"installed":"1.2.3","source":"github"}')
+  assert.deepEqual(runtime.readVersionFile(file), { installed: '1.2.3', source: 'github' })
+  fs.writeFileSync(file, 'not json')
+  assert.equal(runtime.readVersionFile(file), null)
+})

@@ -18,6 +18,8 @@ const fs = require('node:fs')
 const os = require('node:os')
 const { spawn, spawnSync } = require('node:child_process')
 const runtime = require('./runtime-manager.js')
+const githubRelease = require('./github-release.js')
+const githubBuild = require('./github-build.js')
 const { createTray } = require('./tray.js')
 const settingsReader = require('./settings-reader.js')
 const { t } = require('./i18n.js')
@@ -62,6 +64,7 @@ let updateCheckPromise = null
 let pendingUpdatePrompting = false
 let startupUpdateChecked = false
 let handlingUnexpectedDshExit = false
+let githubInstallCancelled = false
 const expectedDshExits = new WeakSet()
 let updatePreferences = { ...DEFAULT_UPDATE_PREFERENCES }
 let terminalManager = null
@@ -130,11 +133,108 @@ function setStartupUpdateCheckEnabled(enabled) {
   if (updatePreferences.checkUpdatesOnStartup) maybeCheckForUpdates()
 }
 
-function setPendingUpdateVersion(version) {
+function setPendingUpdateVersion(version, source = null) {
   const normalized = typeof version === 'string' && version.length <= 64 ? version : null
-  if (updatePreferences.pendingUpdateVersion === normalized) return
+  const normalizedSource = normalized ? (typeof source === 'string' ? source : null) : null
+  if (updatePreferences.pendingUpdateVersion === normalized && updatePreferences.pendingUpdateSource === normalizedSource) return
   updatePreferences.pendingUpdateVersion = normalized
+  updatePreferences.pendingUpdateSource = normalizedSource
   saveUpdatePreferences()
+}
+
+function followGithubReleasesEnabled() {
+  return updatePreferences.followGithubReleases
+}
+
+function setFollowGithubReleasesEnabled(enabled) {
+  updatePreferences.followGithubReleases = enabled === true
+  saveUpdatePreferences()
+  appendLog(`[update] follow github release -> ${updatePreferences.followGithubReleases}`)
+}
+
+/** 当前数据盘可用空间（字节）；探测失败返回 null 跳过磁盘检查。 */
+function currentDiskFree() {
+  try {
+    const stat = fs.statfsSync(runtime.BASE_DIR)
+    return stat.bavail * stat.bsize
+  } catch {
+    return null
+  }
+}
+
+/** 把字节格式化为适合展示的字符串（≥1GB 用 GB）。 */
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return String(bytes)
+  const gb = bytes / 1024 ** 3
+  return gb >= 1 ? `${gb.toFixed(1)} GB` : `${Math.round(bytes / 1024 ** 2)} MB`
+}
+
+/** 把 github-build 的前置检查失败映射为可读文案。 */
+function formatGithubPrereq(prereq) {
+  if (!Array.isArray(prereq) || prereq.length === 0) return String(prereq)
+  return prereq.map((item) => {
+    if (item.key === 'githubPrereqNode') {
+      return `${t(locale, 'githubPrereqNodeMessage', { required: item.required })}\n${t(locale, 'githubPrereqNodeDetail', { current: item.current ?? '-' })}`
+    }
+    if (item.key === 'githubPrereqDisk') {
+      return `${t(locale, 'githubPrereqDiskMessage')}\n${t(locale, 'githubPrereqDiskDetail', { size: formatBytes(item.required), current: formatBytes(item.current) })}`
+    }
+    return String(item.key)
+  }).join('\n\n')
+}
+
+/** 托盘「重新跟随 npm 最新版」可用性：当前运行时来自 GitHub 构建来源。 */
+function rollbackToNpmEnabled() {
+  const meta = runtime.readVersionFile()
+  return meta?.source === 'github'
+}
+
+/** 托盘「重新跟随 npm 最新版」：切到 npm 上的最新版（允许降级，绕过提示守卫）。 */
+async function rollbackToNpm() {
+  if (runtimeOperationLock.activeOperation() || handlingUnexpectedDshExit) return false
+  const installed = runtime.installedVersion()
+  const checking = createAppDialog({
+    mode: 'loading',
+    title: t(locale, 'updateCheckingTitle'),
+    message: t(locale, 'updateCheckingMessage'),
+    cancelable: false,
+    buttons: [],
+  })
+  const latest = await runtime.latestVersion({ log: appendLog })
+  if (!latest) {
+    checking.update({
+      mode: 'error',
+      title: t(locale, 'updateOfflineTitle'),
+      message: t(locale, 'updateOfflineMessage'),
+      detail: installed ?? '',
+      cancelable: true,
+      cancelAction: 'close',
+      defaultAction: 'retry',
+      buttons: [
+        dialogButton('close', 'actionClose'),
+        dialogButton('retry', 'actionRetry', 'primary'),
+      ],
+    })
+    const action = await checking.result
+    if (action === 'retry') return rollbackToNpm()
+    return false
+  }
+  checking.close('continue')
+  const action = await showAppDialog({
+    mode: 'confirm',
+    title: t(locale, 'rollbackTitle'),
+    message: t(locale, 'rollbackConfirmMessage', { version: latest }),
+    detail: t(locale, 'updateAvailableDetail', { current: installed ?? '-', version: latest }),
+    cancelable: true,
+    cancelAction: 'close',
+    defaultAction: 'rollback',
+    buttons: [
+      dialogButton('close', 'actionClose'),
+      dialogButton('rollback', 'actionRollbackNow', 'primary'),
+    ],
+  })
+  if (action !== 'rollback') return false
+  return installRuntimeVersion(latest, 'rollback')
 }
 
 // ── 外观同步：深浅色 + 语言 跟随 dsh 的 settings.yaml ──────────────────────
@@ -366,6 +466,14 @@ function createMainWindow(url) {
     sendWindowControlsState()
     setTimeout(() => revealMainWindow('did-finish-load fallback'), 150)
   })
+  // 页面整页重载（如 DSH 刷新）会清空 preload 注入的弹窗宿主与状态，
+  // 只要应用内弹窗还激活，就在这里把状态重新下发，让弹窗立刻恢复显示。
+  wc.on('did-finish-load', () => {
+    if (activeAppDialog && !activeAppDialog.settled) {
+      appendLog('[dialog-diag] page reloaded, re-sending active dialog state')
+      activeAppDialog.send()
+    }
+  })
   wc.on('did-fail-load', (event, errorCode, errorDescription, validatedURL, isMainFrame) => {
     appendLog(`[window] did-fail-load (${errorCode}) ${errorDescription}: ${validatedURL}`)
     if (isMainFrame) revealMainWindow('did-fail-load')
@@ -442,6 +550,12 @@ function setupIpc() {
     activeAppDialog.finish(payload.action)
   })
 
+  // preload 侧诊断：注入宿主被页面重渲染清空后重挂等事件，写进日志便于定位弹窗消失问题
+  ipcMain.on('dsh:dialog-event', (event, message) => {
+    if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) return
+    appendLog(`[dialog-diag] ${String(message ?? '')}`)
+  })
+
   ipcMain.on('splash:ready', (event) => {
     if (!splash || splash.isDestroyed() || event.sender !== splash.webContents) return
     markSplashReady(splash)
@@ -496,6 +610,7 @@ function createAppDialog(state) {
     state: { ...state, buttons: Array.isArray(state.buttons) ? state.buttons : [], id },
     result,
     settled: false,
+    heartbeat: null,
     send() {
       const target = contentWebContents()
       if (!target || controller.settled) return
@@ -513,6 +628,10 @@ function createAppDialog(state) {
     finish(action) {
       if (controller.settled) return
       controller.settled = true
+      if (controller.heartbeat) {
+        clearInterval(controller.heartbeat)
+        controller.heartbeat = null
+      }
       const target = contentWebContents()
       if (target) target.send('dsh:dialog-state', { id, mode: 'close' })
       if (activeAppDialog === controller) activeAppDialog = null
@@ -520,6 +639,9 @@ function createAppDialog(state) {
     },
   }
   activeAppDialog = controller
+  // 心跳兜底：DSH 页面任何重渲染/重载都可能清掉弹窗宿主，周期重发状态，
+  // 保证 preload 侧（配合看门狗重挂）在最多 1 秒内恢复弹窗显示。
+  controller.heartbeat = setInterval(() => controller.send(), 1000)
 
   if (wc.isLoadingMainFrame()) {
     wc.once('did-finish-load', () => {
@@ -844,7 +966,15 @@ async function performUpdateCheck(manual) {
       })
     : null
 
-  const latest = await runtime.latestVersion({ log: appendLog })
+  const [npmLatest, githubLatest] = await Promise.all([
+    runtime.latestVersion({ log: appendLog }),
+    updatePreferences.followGithubReleases
+      ? githubRelease.latestGithubRelease({ log: appendLog })
+      : Promise.resolve(null),
+  ])
+  // 注意：latestGithubRelease 返回 { version, tag, ... } 对象，pickUpdateCandidate 只认版本字符串
+  const candidate = githubRelease.pickUpdateCandidate(npmLatest, githubLatest ? githubLatest.version : null)
+  const latest = candidate?.version ?? null
 
   if (!latest) {
     appendLog('[update] npm registry unavailable')
@@ -886,13 +1016,13 @@ async function performUpdateCheck(manual) {
   }
 
   if (!manual && (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible())) {
-    setPendingUpdateVersion(latest)
+    setPendingUpdateVersion(latest, candidate.source)
     appendLog(`[update] ${latest} available; prompt deferred until window is shown`)
     return 'deferred'
   }
 
   checking?.close('continue')
-  await promptUpdateVersion(latest)
+  await promptUpdateVersion(latest, candidate.source)
   return 'prompted'
 }
 
@@ -902,11 +1032,84 @@ function maybeCheckForUpdates() {
   checkForUpdates(false).catch((err) => appendLog(`[update] 自动检查失败：${err.message}`))
 }
 
-async function applyUpdate(version) {
+async function applyUpdate(version, source = null) {
+  if (source === 'githubOnly') return installGithubUpdate(version)
   return installRuntimeVersion(version, 'update')
 }
 
-async function promptUpdateVersion(version) {
+/** GitHub-only 版本：先确认构建预期（时长/磁盘），再走「npm 已同步→npm，否则源码构建」安装器。 */
+async function installGithubUpdate(version) {
+  // 前置检查在确认框之前拦截：Node 版本/磁盘不足时不进入确认流程
+  const prereq = githubBuild.checkPrereqs({ getDiskFree: currentDiskFree })
+  if (!prereq.ok) {
+    await showAppDialog({
+      mode: 'error',
+      title: t(locale, 'githubPrereqTitle'),
+      message: t(locale, 'githubBuildFailedMessage', { version }),
+      detail: formatGithubPrereq(prereq.errors),
+      cancelable: true,
+      cancelAction: 'close',
+      defaultAction: 'close',
+      buttons: [
+        dialogButton('open-log', 'actionOpenLog', 'secondary', { keepOpen: true }),
+        dialogButton('close', 'actionClose', 'primary'),
+      ],
+    })
+    return false
+  }
+  const action = await showAppDialog({
+    mode: 'confirm',
+    title: t(locale, 'githubBuildConfirmTitle'),
+    message: t(locale, 'githubBuildConfirmMessage', { version }),
+    detail: t(locale, 'githubBuildConfirmDetail'),
+    cancelable: true,
+    cancelAction: 'later',
+    defaultAction: 'build',
+    buttons: [
+      dialogButton('later', 'actionLater'),
+      dialogButton('build', 'actionUpdateBuild', 'primary'),
+    ],
+  })
+  if (action !== 'build') return false
+  await installRuntimeVersion(version, 'github-update', createUpdateInstaller())
+  return true
+}
+
+/**
+ * 更新安装器：npm 已同步该精确版本 → 走 npm 安装（快）；否则从 GitHub release 构建。
+ * abort() 由进度弹窗取消触发：置会话取消标记并终止所有构建子进程。
+ */
+function createUpdateInstaller() {
+  return {
+    mode: 'github',
+    async run({ version, runtimeDir, log, onProgress, onStatus }) {
+      githubInstallCancelled = false
+      const onNpm = await runtime.npmHasVersion(version, { log })
+      if (onNpm) {
+        log(`[github] npm 已同步 ${version}，走 npm 安装`)
+        return runtime.installVersion(version, { log, onProgress })
+      }
+      log(`[github] npm 未同步 ${version}，从 GitHub release 构建`)
+      return githubBuild.installGithubRelease(version, {
+        log,
+        onProgress,
+        onStatus,
+        runtimeDir,
+        versionFile: runtime.VERSION_FILE,
+        isAborted: () => githubInstallCancelled,
+        // 构建脚本需要提交号（官方用 git rev-parse HEAD；tarball 源码没有 .git，
+        // 这里从 GitHub API 取 tag 指向的 commit，注入 DSH_CLIENT_COMMIT_HASH）
+        resolveCommit: (tag) => githubRelease.resolveTagCommit(tag),
+      })
+    },
+    abort() {
+      githubInstallCancelled = true
+      githubBuild.abortBuild()
+    },
+  }
+}
+
+async function promptUpdateVersion(version, source = null) {
   if (pendingUpdatePrompting) return
   const installed = runtime.installedVersion()
   if (installed && runtime.compareVersions(version, installed) <= 0) {
@@ -918,24 +1121,25 @@ async function promptUpdateVersion(version) {
     return
   }
 
+  const githubOnly = (source ?? updatePreferences.pendingUpdateSource) === 'githubOnly'
   pendingUpdatePrompting = true
   try {
     const action = await showAppDialog({
       mode: 'confirm',
-      title: t(locale, 'updateAvailableTitle'),
-      message: t(locale, 'updateAvailableMessage', { version }),
-      detail: t(locale, 'updateAvailableDetail', { current: installed ?? '-', version }),
+      title: t(locale, githubOnly ? 'githubUpdateAvailableTitle' : 'updateAvailableTitle'),
+      message: t(locale, githubOnly ? 'githubUpdateAvailableMessage' : 'updateAvailableMessage', { version }),
+      detail: t(locale, githubOnly ? 'githubUpdateAvailableDetail' : 'updateAvailableDetail', { current: installed ?? '-', version }),
       cancelable: true,
       cancelAction: 'later',
       defaultAction: 'update',
       buttons: [
         dialogButton('later', 'actionLater'),
-        dialogButton('update', 'actionUpdateNow', 'primary'),
+        dialogButton('update', githubOnly ? 'actionUpdateBuild' : 'actionUpdateNow', 'primary'),
       ],
     })
     if (action === 'unavailable' || action === 'replaced') return
     setPendingUpdateVersion(null)
-    if (action === 'update') await applyUpdate(version)
+    if (action === 'update') await applyUpdate(version, githubOnly ? 'githubOnly' : null)
   } finally {
     pendingUpdatePrompting = false
   }
@@ -955,7 +1159,27 @@ function maybeShowPendingUpdate() {
   promptUpdateVersion(version).catch((err) => appendLog(`[update] pending prompt failed: ${err.message}`))
 }
 
-async function installRuntimeVersion(version, operation) {
+/**
+ * 运行时修复分派（ensureRuntime 只在运行时不可用时调用）：
+ * - 目标版本已在 npm 上 → npm 安装（快通道，也覆盖旧版本修复）；
+ * - 来自 GitHub 构建且本地 tarballs 缓存完整 → 缓存重装（无需重建）；
+ * - GitHub 版本损坏且缓存缺失 → 明确失败（托盘「重新跟随 npm 最新版」是回滚出口）。
+ */
+async function repairRuntimeInstaller(target, options = {}) {
+  const log = options.log ?? (() => {})
+  if (await runtime.npmHasVersion(target, { log })) {
+    return runtime.installVersion(target, options)
+  }
+  const meta = runtime.readVersionFile(options.versionFile)
+  if (meta?.source === 'github' && meta.installed === target) {
+    const cached = await githubBuild.reinstallFromCache(target, { ...options, log })
+    if (cached.ok) return cached
+    return { ok: false, err: `${cached.err ?? ''}\n${t(locale, 'githubRepairFailedMessage')}` }
+  }
+  return runtime.installVersion(target, options)
+}
+
+async function installRuntimeVersion(version, operation, installer = null) {
   const activeOperation = runtimeOperationLock.activeOperation()
   if (activeOperation) {
     appendLog(`[${operation}] 拒绝并发操作：正在执行 ${activeOperation}`)
@@ -965,7 +1189,7 @@ async function installRuntimeVersion(version, operation) {
   const execution = await runtimeOperationLock.run(operation, async () => {
     appendLog(`[${operation}] runtime operation started`)
     try {
-      return await performRuntimeInstall(version, operation)
+      return await performRuntimeInstall(version, operation, installer)
     } finally {
       appendLog(`[${operation}] runtime operation finished`)
     }
@@ -973,38 +1197,56 @@ async function installRuntimeVersion(version, operation) {
   return execution.accepted ? execution.value : false
 }
 
-async function performRuntimeInstall(version, operation) {
+async function performRuntimeInstall(version, operation, installer = null) {
   while (true) {
+    const isGithub = installer !== null
+    const githubTitle = t(locale, 'githubBuildTitle')
+    const githubMessage = t(locale, 'githubBuildMessage', { version })
     const progress = createAppDialog({
       mode: 'progress',
-      title: t(locale, 'updateInstallingTitle'),
-      message: t(locale, 'updateInstallingMessage', { version }),
-      cancelable: false,
-      buttons: [],
+      title: isGithub ? githubTitle : t(locale, 'updateInstallingTitle'),
+      message: isGithub ? githubMessage : t(locale, 'updateInstallingMessage', { version }),
+      cancelable: isGithub,
+      cancelAction: 'cancel',
+      buttons: isGithub ? [dialogButton('cancel', 'actionCancel')] : [],
     })
-    appendLog(`[${operation}] installing ${version}`)
+    appendLog(`[${operation}] installing ${version}${isGithub ? ' via GitHub build' : ''}`)
     let lastProgressAt = 0
-    const installed = await runtime.installVersion(version, {
-      log: appendLog,
-      // 把 npm 输出实时显示到进度弹窗，用户能看到下载到哪个包、是否在推进
-      onProgress: (text) => {
-        const now = Date.now()
-        if (now - lastProgressAt < 500) return
-        lastProgressAt = now
-        const line = String(text)
-          .replace(/\u001b\[[0-9;]*m/g, '') // 去掉 ANSI 颜色码
-          .split(/\r?\n/)
-          .filter(Boolean)
-          .pop()
-        if (line) progress.update({ detail: line.slice(-160) })
-      },
-    })
+    const onProgress = (text) => {
+      const now = Date.now()
+      if (now - lastProgressAt < 500) return
+      lastProgressAt = now
+      const line = String(text)
+        .replace(/\u001b\[[0-9;]*m/g, '') // 去掉 ANSI 颜色码
+        .split(/\r?\n/)
+        .filter(Boolean)
+        .pop()
+      if (line) progress.update({ detail: line.slice(-160) })
+    }
+    const onStatus = (phaseKey) => {
+      progress.update({ title: githubTitle, message: githubMessage, detail: t(locale, phaseKey) })
+    }
+    // 用户点击「取消」时通知安装器中止；安装器负责杀掉子进程树并尽快返回。
+    progress.result.then((action) => {
+      if (action === 'cancel' && installer) installer.abort()
+    }).catch(() => {})
+    const installed = await (isGithub
+      ? installer.run({ version, runtimeDir: runtime.RUNTIME_DIR, log: appendLog, onProgress, onStatus })
+      : runtime.installVersion(version, { log: appendLog, onProgress }))
+    if (installed && installed.prereq) {
+      installed.err = `${installed.err ?? ''}\n${formatGithubPrereq(installed.prereq)}`
+    }
+    if (installed.cancelled === true) {
+      appendLog(`[${operation}] cancelled`)
+      progress.close('closed')
+      return false
+    }
     if (!installed.ok) {
       appendLog(`[${operation}] install failed: ${installed.err ?? 'unknown error'}`)
       progress.update({
         mode: 'error',
-        title: t(locale, 'updateFailedTitle'),
-        message: t(locale, 'updateFailedMessage', { version }),
+        title: t(locale, isGithub ? 'githubBuildFailedTitle' : 'updateFailedTitle'),
+        message: t(locale, isGithub ? 'githubBuildFailedMessage' : 'updateFailedMessage', { version }),
         detail: String(installed.err ?? '').slice(-4000),
         cancelable: true,
         cancelAction: 'close',
@@ -1055,6 +1297,7 @@ async function performRuntimeInstall(version, operation) {
     setPendingUpdateVersion(null)
     currentUrl = started.url
     progress.close('completed')
+    tray?.refresh()
     const wc = contentWebContents()
     if (wc) await wc.loadURL(started.url)
     else createMainWindow(started.url)
@@ -1101,6 +1344,10 @@ function setupTray() {
     checkForUpdates,
     startupUpdateCheckEnabled,
     setStartupUpdateCheckEnabled,
+    followGithubReleasesEnabled,
+    setFollowGithubReleasesEnabled,
+    rollbackToNpmEnabled,
+    rollbackToNpm,
     openInBrowser,
     openTerminal,
     openLog,
@@ -1165,7 +1412,7 @@ async function runStartupAttempt() {
 
     const hasRuntime = runtime.runtimeStatus().usable
     setSplashLoading(hasRuntime ? 'startupPrepareRuntime' : 'startupInstallRuntime')
-    const ensured = await runtime.ensureRuntime({ log: appendLog })
+    const ensured = await runtime.ensureRuntime({ log: appendLog, installer: repairRuntimeInstaller })
     if (!ensured.ok) {
       appendLog(`[runtime] ensure failed: ${ensured.err ?? 'unknown error'}`)
       setSplashError(
@@ -1181,6 +1428,15 @@ async function runStartupAttempt() {
       return
     }
     appendLog(`[runtime] 当前 @deepseek-ai/dsh 版本：${ensured.version}`)
+
+    // GitHub 来源校正：若当前运行时来自 GitHub 源码构建、且 npm 已同步该精确版本，
+    // 则改用 npm 安装并删除构建产物（详情见 github-build.switchToNpmWhenSynced）。
+    // 必须在 startDsh 之前完成，切换后只启动一次 DSH；任何失败都保持 GitHub 构建继续启动。
+    const switchResult = await runtimeOperationLock.run('switch-to-npm', () =>
+      githubBuild.switchToNpmWhenSynced({ log: appendLog, onStatus: (key) => setSplashLoading(key) }))
+    if (switchResult.accepted && switchResult.value?.switched) {
+      appendLog(`[switch-to-npm] 已切换到 npm 官方版本 ${switchResult.value.version}，构建产物已清理`)
+    }
 
     setSplashLoading('startupStartDsh')
     stopDsh()
@@ -1209,6 +1465,8 @@ async function runStartupAttempt() {
       createMainWindow(started.url)
     }
     maybeCheckForUpdates()
+    // 启动可能完成 GitHub 构建来源的修复，菜单里的回滚项可用性随版本来源变化
+    tray?.refresh()
   } catch (err) {
     appendLog(`[startup] unexpected error: ${err && err.stack ? err.stack : err}`)
     setSplashError(

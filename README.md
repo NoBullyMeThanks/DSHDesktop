@@ -11,7 +11,7 @@ DSH Desktop 是一个面向 Windows 的 DeepSeek Harness（DSH）桌面启动器
 ## 核心能力
 
 - **双击直接启动**：自动检查 Node.js 环境、安装或复用独立的 DSH 运行时、使用系统分配的空闲端口启动 DSH Web 服务，并在原生桌面窗口中加载官方 Web UI，全程无需命令行。
-- **跟随官方最新版本**：默认在应用启动后检查 npm registry 上的最新版本（官方源不可达时自动回退镜像源），可在托盘中关闭自动检查，也支持手动检查更新；发现新版本后可在应用内一键更新，随后自动重启 DSH。
+- **跟随官方最新版本**：默认在应用启动后检查 npm registry 上的最新版本（官方源不可达时自动回退镜像源），可在托盘中关闭自动检查，也支持手动检查更新；发现新版本后可在应用内一键更新，随后自动重启 DSH。自 2.1.0 起默认同时跟随官方 GitHub release：官方 npm 发布是手动流程、常滞后于 GitHub，发现「GitHub 已发版但 npm 尚未同步」时提示，确认后按官方发布流程从源码构建安装（约 15–40 分钟、数 GB 磁盘、可取消），构建产物与官方 npm 发布完全一致；托盘可关闭该行为，也可一键「重新跟随 npm 最新版」回滚。
 - **运行时独立管理**：DSH 以 npm 包形式安装在用户目录 `~/.dshdesktop/runtime/`，不绑定启动器源码或安装包；网络不可用时直接复用已安装版本。
 - **内嵌终端面板**：`` Ctrl+` `` 一键打开 PowerShell/cmd 终端（也可通过窗口按钮或托盘「打开终端」），支持多会话、底部/右侧停靠、拖动调整尺寸、会话重命名，随深浅色主题自动切换。
 
@@ -88,7 +88,8 @@ node $dsh plugin --profile web remove workspace-file-tree-client
 | 路径 | 内容 |
 |---|---|
 | `~/.dshdesktop/runtime/` | DSH Desktop 管理的 DSH npm 运行时 |
-| `~/.dshdesktop/version.json` | 当前已安装的 DSH 版本记录 |
+| `~/.dshdesktop/build/` | GitHub release 构建缓存（源码、pnpm 工具链与 tarballs；成功构建后仅保留 tarballs 供修复复用） |
+| `~/.dshdesktop/version.json` | 当前已安装的 DSH 版本记录（含来源：npm / GitHub） |
 | `~/.dshdesktop/preferences.json` | 启动更新检查等桌面端偏好 |
 | `~/.dshdesktop/dsh.log` | 桌面启动器和 DSH 子进程日志 |
 | `~/.dsh/` | DSH 自身的凭据、设置和会话数据 |
