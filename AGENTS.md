@@ -38,6 +38,8 @@
 
 - 提交信息必须采用简洁的 Conventional Commits 格式 `type: 中文说明`；类型使用小写英文（如 `feat`、`fix`、`chore`），说明使用中文，例如 `fix: 处理 DSH 启动超时`。
 
+- **每次推送前先询问软件版本号应怎么修改**：不得自行决定升不升版本或升到哪个版本，必须先问用户（升 major/minor/patch、还是不升）。版本号是 `package.json` 的 `version`（`package-lock.json` 顶部两处需同步），按惯例单独提交 `chore: 版本提升到 x.y.z`；用户明确说不用改时才跳过这一步。
+
 Pull Request 应说明动机、主要改动和验证命令，关联相关 issue；界面或托盘行为变化需附截图。保持单个 PR 聚焦，避免夹带 `dist/`、日志、凭据或本机 `~/.dsh*` 数据。
 
 ## 安全与配置
