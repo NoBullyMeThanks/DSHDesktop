@@ -243,6 +243,12 @@
   3. **终端区抖动**：拖动中 `ResizeObserver` 反复触发 xterm `fit()`/PTY resize（~10Hz 文字重排）→ 拖动期间挂起重排（`resizingPanel` 标志，observer/窗口 resize 监听均跳过），`pointerup` 后统一补一次 fit。
   - 冒烟健壮性：① 边界线断言放宽为「明显非零」——150% 分数缩放下渲染器会把 1px 折算成 0.666667px（仍是 1 物理像素线），原 `=== '1px'` 会误报；② desktopCapturer 源**严格按窗口 id 匹配、绝不回退 sources[0]**（曾采到用户其他窗口造成误报），采不到本窗口记环境跳过。
 
+- **八次修正记录（窗口按钮整组移到窗口左上角，用户要求，方案 A）**：
+  1. **按钮顺序改为 `关闭 | 最大化 | 最小化 │ 终端`**（`src/preload.js` 注入的自绘 UI）：整组移到左侧后，Windows「关闭固定在右上角」的肌肉记忆已经失效，改由关闭占据 (0,0) 窗口角（Fitts 定律；同 macOS 交通灯与 Windows RTL 的镜像习惯），破坏性操作离内容区最远；终端是应用动作而非窗口控制，用 1px 分隔线（`--dsw-alias-border-l2`）与窗口三键隔开，避免误点关闭。`.controls` 不再写死 `width: 112px`（4×28 + 分隔线 1 + 两侧 3px = 119px，随内容自适应）。
+  2. **侧栏列整体让出按钮带**：新增 `SIDEBAR_TOP_INSET_PX = 28 + 1 − 6 = 23`，`applyTopInset(element, insetPx)` 改为按列传参（会话列仍是 17）。展开态侧栏 root 计算内边距 6px → 品牌行顶边落到 29px，与会话列内容顶边同高、距按钮底边 1px；折叠成 rail 时 DSH 自身 padding 18px → 41px，让出更多（rail 宽约 56px，按钮组会跨到会话列上方，垂直方向仍不重叠）。
+  3. **右停靠面板 `RIGHT_DOCK_TOP_INSET` 28 → 0**（`src/terminal/utils.js`，`manager.js` 的镜像常量同步）：原值只为右上角窗口按钮让位；按钮左移后，空会话（标题行隐藏、`headerBottom = 0`）时面板可贴窗口顶吃满高度，正常态仍与标题区底边线共线。
+  - 验证：`node --check`（preload/utils/manager/main）通过；`npm test` **137/137 通过**；再用真实 DSH 页面（`?token=` 认证 URL）+ 真实 `src/preload.js` 在 Electron 43 渲染截图核对：按钮带 0–28px、侧栏品牌行自 29px 起无遮挡、右上角腾空。
+
 ## 6. 风险与备选
 
 | 风险 | 应对 |

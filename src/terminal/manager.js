@@ -60,8 +60,8 @@ const INITIAL_ROWS = 24
 const RIGHT_DOCK_RATIO = 0.35
 const RIGHT_DOCK_MIN_WIDTH = 320
 const RIGHT_DOCK_MAX_RATIO = 0.6
-/** 右侧停靠时顶部让出的最小高度（窗口按钮区 28px，WebContentsView 永远盖在页面之上）。 */
-const RIGHT_DOCK_TOP_INSET = 28
+/** 右侧停靠时顶部让出的最小高度（窗口按钮组已在窗口左上角，无需再让位）。 */
+const RIGHT_DOCK_TOP_INSET = 0
 /** 面板 header 高度（panel/index.html 的 .header），用于与 DSH 标题区域底边线对齐。 */
 const PANEL_HEADER_HEIGHT = 34
 

@@ -20,8 +20,9 @@ const MAX_SIZE = 1000
 const RIGHT_DOCK_RATIO = 0.35
 const RIGHT_DOCK_MIN_WIDTH = 320
 const RIGHT_DOCK_MAX_RATIO = 0.6
-/** 右侧停靠时顶部让出的最小高度（窗口按钮区，WebContentsView 永远盖在页面之上）。 */
-const RIGHT_DOCK_TOP_INSET = 28
+/** 右侧停靠时顶部让出的最小高度：窗口按钮组已移到窗口左上角，不再需要为它留空；
+ *  会话标题行缺失（空会话/hero）时面板可贴窗口顶，吃满高度。 */
+const RIGHT_DOCK_TOP_INSET = 0
 /** 右侧停靠时面板顶边的像素校准：DSH 标题区底边线占 1px（[bottom-1, bottom)），
  *  面板顶边若直接取 headerBottom，其 header 顶边线会落在 [bottom, bottom+1)，
  *  两条线并排成 2px、无法重合。上移 1px 后两条线完全重叠，视觉上是一条线。 */
@@ -97,9 +98,9 @@ function computeDockBounds(width, height, options = {}) {
     const panelWidth = Number.isFinite(Number(options.panelWidth)) && Number(options.panelWidth) > 0
       ? Math.round(Math.min(Math.max(Number(options.panelWidth), 200), width * 0.75))
       : defaultWidth
-    // 顶部让位：≥ 窗口按钮区（28px），且**面板顶边**与 DSH 会话区标题区域的
-    // 底边线共线（headerBottom 缺失时用下限兜底）；面板 header 顶边有边框线，
-    // 两条横线视觉连续。
+    // 顶部让位：**面板顶边**与 DSH 会话区标题区域的底边线共线（headerBottom
+    // 缺失、即标题行隐藏时贴窗口顶）；面板 header 顶边有边框线，两条横线视觉
+    // 连续。窗口按钮在左上角，不再需要为按钮让出高度。
     const headerBottom = layout && Number.isFinite(layout.headerBottom)
       ? Math.max(0, layout.headerBottom)
       : 0

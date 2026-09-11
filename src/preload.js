@@ -28,12 +28,20 @@ const LIGHT_DIALOG_LABEL = Object.freeze({ red: 255, green: 255, blue: 255, alph
 const WINDOW_CONTROL_BAR_HEIGHT = 28
 /** DSH 会话区 header 的顶部内边距（头部按钮条距窗口顶的既有距离）。 */
 const SESSION_HEADER_TOP_PADDING = 12
+/** DSH 侧栏 root 的顶部内边距（展开态 6px；折叠成 rail 时 DSH 自己改成 18px）。 */
+const SIDEBAR_TOP_PADDING = 6
 /**
- * 顶部边框条带高度：DSH 内容整体下移该距离，使窗口按钮行底部与会话区头部
+ * 顶部边框条带高度：会话列内容下移该距离，使窗口按钮行底部与会话区头部
  * 按钮（Session log 等）上边框恰好留 1px 间隙（28 + 1 − 12 = 17）。
  * 条带是窗口拖动区；下移保证窗口按钮不遮挡会话区头部的按钮。
  */
 const TOP_BORDER_INSET_PX = WINDOW_CONTROL_BAR_HEIGHT + 1 - SESSION_HEADER_TOP_PADDING
+/**
+ * 侧栏列下移量（28 + 1 − 6 = 23）：窗口按钮组占据窗口左上角，正好压在侧栏列
+ * 顶部，品牌行必须整行让出按钮带。按各列自身内边距补偿后，侧栏列与会话列的
+ * 内容顶边同为 29px，都距按钮底边 1px。
+ */
+const SIDEBAR_TOP_INSET_PX = WINDOW_CONTROL_BAR_HEIGHT + 1 - SIDEBAR_TOP_PADDING
 
 function ensureDialogUi() {
   if (dialogRoot || !document.body) return
@@ -520,7 +528,7 @@ function ensureWindowControls() {
   Object.assign(windowControlsHost.style, {
     position: 'fixed',
     top: '0',
-    right: '0',
+    left: '0',
     zIndex: '2147483646',
     pointerEvents: 'none',
     webkitAppRegion: 'no-drag',
@@ -536,10 +544,18 @@ function ensureWindowControls() {
       * { box-sizing: border-box; }
       .controls {
         display: flex;
-        width: 112px;
         height: ${WINDOW_CONTROL_BAR_HEIGHT}px;
         pointer-events: auto;
         -webkit-app-region: no-drag;
+      }
+      /* 终端是应用动作而非窗口控制：与窗口三键之间用细分隔线隔开，避免误点关闭。 */
+      .divider {
+        width: 1px;
+        height: 14px;
+        align-self: center;
+        margin: 0 3px;
+        background: var(--dsw-alias-border-l2, rgba(127, 127, 127, 0.35));
+        pointer-events: none;
       }
       button {
         width: ${WINDOW_CONTROL_BAR_HEIGHT}px;
@@ -585,18 +601,19 @@ function ensureWindowControls() {
       }
     </style>
     <div class="controls" data-maximized="false" data-terminal-open="false">
-      <button type="button" data-action="terminal">
-        <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 3.5l3 2.5-3 2.5M6.5 8.5h3" /></svg>
-      </button>
-      <button type="button" data-action="minimize">
-        <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 8.5h8" /></svg>
+      <button type="button" data-action="close">
+        <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 2.5l7 7m0-7l-7 7" /></svg>
       </button>
       <button type="button" data-action="toggle-maximize">
         <svg class="maximize" viewBox="0 0 12 12" aria-hidden="true"><rect x="2" y="2" width="8" height="8" /></svg>
         <svg class="restore" viewBox="0 0 12 12" aria-hidden="true"><path d="M4 3V2h6v6H9M2 4h6v6H2z" /></svg>
       </button>
-      <button type="button" data-action="close">
-        <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 2.5l7 7m0-7l-7 7" /></svg>
+      <button type="button" data-action="minimize">
+        <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 8.5h8" /></svg>
+      </button>
+      <span class="divider" aria-hidden="true"></span>
+      <button type="button" data-action="terminal">
+        <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 3.5l3 2.5-3 2.5M6.5 8.5h3" /></svg>
       </button>
     </div>
   `
@@ -688,18 +705,19 @@ function swapDragMark(prev, next) {
 const topInsetApplied = new WeakSet()
 
 /**
- * 给容器内容下移 TOP_BORDER_INSET_PX（幂等，每元素只加一次）。
+ * 给容器内容下移 insetPx（幂等，每元素只加一次）。
  * 在「列根」上下移而不是整体推 frame：列的背景从窗口顶一直铺到内容，
  * 顶部条带与下方同色，不会出现一条异色横带；内容不越界需 border-box。
+ * 两列自身的内边距不同（会话列 header 12px、侧栏品牌行 6px），故下移量按列传参。
  */
-function applyTopInset(element) {
+function applyTopInset(element, insetPx) {
   if (!(element instanceof HTMLElement)) return
   if (topInsetApplied.has(element)) return
   const computed = getComputedStyle(element)
   const current = parseFloat(computed.paddingTop)
   if (!Number.isFinite(current)) return
   element.style.boxSizing = 'border-box'
-  element.style.paddingTop = `${Math.round(current + TOP_BORDER_INSET_PX)}px`
+  element.style.paddingTop = `${Math.round(current + insetPx)}px`
   topInsetApplied.add(element)
 }
 
@@ -732,13 +750,13 @@ function ensureDragStrip() {
 }
 
 /**
- * 顶部条带内容下移：给侧栏根与会话列根加 TOP_BORDER_INSET_PX 顶部内边距
- * （幂等）。在「列根」上下移而不是整体推 frame：列的背景从窗口顶一直铺到
- * 内容，顶部条带与下方同色；会话区头部按钮随之下移，与窗口按钮行留出间隙。
+ * 顶部条带内容下移：窗口按钮组在窗口左上角，侧栏列要整行让出按钮带（23px），
+ * 会话列只需让出条带高度（17px）。两列都在「列根」上下移而不是整体推 frame：
+ * 列的背景从窗口顶一直铺到内容，顶部条带与下方同色（幂等）。
  */
 function applyColumnInsets() {
-  applyTopInset(findSidebarRoot())
-  applyTopInset(findConversationRoot())
+  applyTopInset(findSidebarRoot(), SIDEBAR_TOP_INSET_PX)
+  applyTopInset(findConversationRoot(), TOP_BORDER_INSET_PX)
 }
 
 function updateDragRegion() {
