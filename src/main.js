@@ -26,7 +26,13 @@ const { t } = require('./i18n.js')
 const { createOperationLock } = require('./runtime-operation-lock.js')
 const { DEFAULT_UPDATE_PREFERENCES, normalizeUpdatePreferences } = require('./update-preferences.js')
 const { captureStallDiagnostics, extractDebuggerWsUrl } = require('./stall-diagnostics.js')
-const { centeredSplashBounds, normalizeSplashMode, splashLayoutForContent } = require('./startup/layout.js')
+const {
+  centeredSplashBounds,
+  normalizeSplashMode,
+  splashLayoutForContent,
+} = require('./startup/layout.js')
+const { createStartupProgress } = require('./startup/progress.js')
+const { createNpmProgressReader } = require('./startup/npm-progress.js')
 const { createTerminalManager } = require('./terminal/manager.js')
 
 /** 等待 dsh 打印就绪 URL 的超时（首启要初始化 profile，放宽到 120s）。 */
@@ -54,6 +60,9 @@ let isQuitting = false
 let locale = 'zh'
 let lastWheelZoomAt = 0
 let splashState = null
+/** 已打包好、等待 renderer 就绪后补发的最新 splash 状态（未就绪期间不丢阶段）。 */
+let pendingSplashState = null
+let splashFlushScheduled = false
 let splashReady = false
 let splashRevealTimer = null
 let startupAttempt = 0
@@ -325,12 +334,26 @@ function revealSplash(win) {
   if (!win.isVisible()) win.show()
 }
 
+/**
+ * 渲染进程就绪后立刻补发最新状态并显示启动窗口。
+ *
+ * 关键点：renderer 起来之前发生的阶段切换不能丢。启动前段有同步的
+ * nodeVersion()/runtimeStatus()（实测 0.8s，冷缓存更久）会占住事件循环，
+ * 期间 renderer 的 splash:ready 排队等着；若此时把状态直接丢弃，用户看到的
+ * 第一个画面就只剩最后一个阶段。因此未就绪时先把状态挂在 pendingSplashState，
+ * 就绪后补发一次，窗口首帧即为当前真实阶段。
+ *
+ * 固定延迟从 250ms 收紧到 40ms：窗口内容由 did-finish-load/splash:ready 保证
+ * 已可渲染，长延迟只会让启动窗口更晚出现，把前面的真实百分比帧挤出可见范围。
+ */
+const SPLASH_REVEAL_GUARD_MS = 40
+
 function markSplashReady(win) {
   if (win.isDestroyed() || splash !== win || splashReady) return
   splashReady = true
-  sendSplashState()
+  flushSplashState()
   if (!splashState) return
-  splashRevealTimer = setTimeout(() => revealSplash(win), 250)
+  splashRevealTimer = setTimeout(() => revealSplash(win), SPLASH_REVEAL_GUARD_MS)
 }
 
 function resizeSplash(layout) {
@@ -346,26 +369,57 @@ function destroySplash() {
   splash = null
   splashReady = false
   splashState = null
+  pendingSplashState = null
 }
 
 function currentTheme() {
   return nativeTheme.shouldUseDarkColors ? 'dark' : 'light'
 }
 
+/**
+ * 下发启动窗口状态。renderer 未就绪时不能直接丢弃：启动前段的同步检查
+ * （nodeVersion/runtimeStatus 实测 0.8s，冷缓存 8.9s）会占住事件循环，期间
+ * 所有阶段切换都排在 splash:ready 之前。这里把最新状态挂在 pendingSplashState，
+ * 等 markSplashReady() 补发——补发的是最新一条，中间态无需重放。
+ */
 function sendSplashState() {
-  if (!splashReady || !splashState || !splash || splash.isDestroyed()) return
-  const mode = normalizeSplashMode(splashState.mode)
+  if (!splashState || !splash || splash.isDestroyed()) return
+  pendingSplashState = {
+    ...splashState,
+    locale,
+    theme: currentTheme(),
+  }
+  if (!splashReady) return
+  // 同一 tick 内常有多次状态变化（阶段推进 + 进度快照），合并成一条下发，
+  // 避免中间态先到达导致「阶段文案还没变、百分比先跳了」。
+  if (splashFlushScheduled) return
+  splashFlushScheduled = true
+  queueMicrotask(() => {
+    splashFlushScheduled = false
+    flushSplashState()
+  })
+}
+
+function flushSplashState() {
+  if (!splashReady || !pendingSplashState || !splash || splash.isDestroyed()) return
+  const mode = normalizeSplashMode(pendingSplashState.mode)
   const currentBounds = splash.getBounds()
   const expectedWidth = splashLayoutForContent(mode).width
   if (currentBounds.width !== expectedWidth) {
     resizeSplash({ width: expectedWidth, height: currentBounds.height })
   }
-  splash.webContents.send('splash:state', {
-    ...splashState,
-    locale,
-    theme: currentTheme(),
-  })
+  splash.webContents.send('splash:state', pendingSplashState)
 }
+
+/**
+ * 启动进度：事件驱动。每个真实事件（阶段开始/结束、npm 实际抓包计数）才推进，
+ * 不存在按时间推演的兜底动画。阶段结束后快照会随 splash:state 一起下发。
+ */
+const startupProgress = createStartupProgress((snapshot) => {
+  if (!splashState || splashState.mode !== 'loading') return
+  splashState = { ...splashState, progress: snapshot }
+  sendSplashState()
+})
 
 function setSplashLoading(stageKey) {
   splashState = {
@@ -374,6 +428,7 @@ function setSplashLoading(stageKey) {
     title: t(locale, 'splashTitle'),
     message: t(locale, 'splashMessage'),
     stage: t(locale, stageKey),
+    progress: startupProgress.snapshot(),
   }
   sendSplashState()
 }
@@ -1387,6 +1442,69 @@ async function startup() {
   await runStartupAttempt()
 }
 
+/**
+ * 首次安装阶段：把 npm 的真实输出流解析成事实性计数显示在进度条下方。
+ * npm 不输出依赖总数，因此这里只报告「已获取 N 个包」这类真实发生的事件，
+ * 不折算成百分比——总包数未知时任何比例都是编造的。
+ */
+const installProgressReader = createNpmProgressReader()
+let installProgressTimer = null
+
+function handleStartupInstallOutput(chunk) {
+  installProgressReader.push(chunk)
+  if (installProgressTimer) return
+  // npm 的输出很密，合并到一次刷新，避免每行都发一次 IPC
+  installProgressTimer = setTimeout(() => {
+    installProgressTimer = null
+    if (!splashState || splashState.mode !== 'loading') return
+    const { tarballs, metadataRequests } = installProgressReader.snapshot()
+    const metrics = tarballs > 0
+      ? t(locale, 'splashInstallPackages', { count: tarballs })
+      : metadataRequests > 0
+        ? t(locale, 'splashInstallResolving', { count: metadataRequests })
+        : null
+    if (metrics) startupProgress.setMetrics(metrics)
+  }, 250)
+}
+
+/**
+ * 单个阶段状态在屏幕上至少停留多久，之后才允许推进下一个阶段。
+ *
+ * 实测：窗口 show() 之后 Chromium 才提交首帧（show +207ms，首帧上报 +299ms），
+ * 因此"等帧上报"并不能保证前一帧被看见——窗口可见之前画的帧不会上屏。
+ * 纯等帧的结果是 4% 从未显示、10% 一闪而过。这里改成按可见时长保底：
+ * 状态已可见就先让这一帧停住，停满 MIN 再推进。
+ * 只保底不压缩：非可见状态下立即返回，不引入额外等待。
+ */
+const SPLASH_MIN_STATE_VISIBLE_MS = 260
+
+function holdSplashState(win) {
+  if (!win || win.isDestroyed() || !win.isVisible()) return Promise.resolve()
+  return new Promise((resolve) => setTimeout(resolve, SPLASH_MIN_STATE_VISIBLE_MS))
+}
+
+/**
+ * 等启动窗口真正出现在屏幕上。
+ *
+ * Windows 上 show() 之后有一段系统渐现动画，期间窗口还没开始正常重绘；
+ * 用 'show' 事件作为窗口已上屏的信号。
+ */
+function waitForSplashShown(win) {
+  if (!win || win.isDestroyed() || win.isVisible()) return Promise.resolve()
+  return new Promise((resolve) => {
+    let settled = false
+    const finish = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      win.removeListener('show', finish)
+      resolve()
+    }
+    const timer = setTimeout(finish, 600)
+    win.once('show', finish)
+  })
+}
+
 async function runStartupAttempt() {
   if (startupInProgress) return
   startupInProgress = true
@@ -1394,7 +1512,14 @@ async function runStartupAttempt() {
   if (!splash || splash.isDestroyed()) createSplash()
 
   try {
+    // 重试（retry 按钮）会再次进入这里：上一轮的进度必须从 0 重新计
+    startupProgress.reset()
+    startupProgress.begin('environment')
     setSplashLoading('startupCheckEnvironment')
+    // 等窗口真正上屏（含 Windows 的系统渐现）再往下走：可见之前画的帧不会上屏，
+    // 否则 4% 这一帧会被浪费掉。后面的 nodeVersion/runtimeStatus 是同步的
+    // （实测 0.8s，冷缓存 8.9s），只能让它们排在首帧之后。
+    await waitForSplashShown(splash)
     const nodeVersion = runtime.nodeVersion()
     if (!runtime.nodeIsAvailable(nodeVersion)) {
       setSplashError(
@@ -1410,9 +1535,24 @@ async function runStartupAttempt() {
       return
     }
 
+    // 「环境检查已通过」这一真实事件要单独成一帧：紧随其后的 runtimeStatus()
+    // 是同步的 peer 校验（实测 0.3~0.9s，冷缓存 8.9s），会把这一帧直接压掉。
+    // 因此先把 10% 发出去、确保 4% 已被看见，再跑这段同步检查。
+    await holdSplashState(splash)
+    startupProgress.begin('runtime')
+    setSplashLoading('startupPrepareRuntime')
+    await holdSplashState(splash)
+
     const hasRuntime = runtime.runtimeStatus().usable
-    setSplashLoading(hasRuntime ? 'startupPrepareRuntime' : 'startupInstallRuntime')
-    const ensured = await runtime.ensureRuntime({ log: appendLog, installer: repairRuntimeInstaller })
+    if (!hasRuntime) {
+      startupProgress.begin('install')
+      setSplashLoading('startupInstallRuntime')
+    }
+    const ensured = await runtime.ensureRuntime({
+      log: appendLog,
+      installer: repairRuntimeInstaller,
+      onProgress: handleStartupInstallOutput,
+    })
     if (!ensured.ok) {
       appendLog(`[runtime] ensure failed: ${ensured.err ?? 'unknown error'}`)
       setSplashError(
@@ -1433,11 +1573,18 @@ async function runStartupAttempt() {
     // 则改用 npm 安装并删除构建产物（详情见 github-build.switchToNpmWhenSynced）。
     // 必须在 startDsh 之前完成，切换后只启动一次 DSH；任何失败都保持 GitHub 构建继续启动。
     const switchResult = await runtimeOperationLock.run('switch-to-npm', () =>
-      githubBuild.switchToNpmWhenSynced({ log: appendLog, onStatus: (key) => setSplashLoading(key) }))
+      githubBuild.switchToNpmWhenSynced({
+        log: appendLog,
+        onStatus: (key) => {
+          startupProgress.begin('switch-source')
+          setSplashLoading(key)
+        },
+      }))
     if (switchResult.accepted && switchResult.value?.switched) {
       appendLog(`[switch-to-npm] 已切换到 npm 官方版本 ${switchResult.value.version}，构建产物已清理`)
     }
 
+    startupProgress.begin('dsh')
     setSplashLoading('startupStartDsh')
     stopDsh()
     const started = await startDsh()
@@ -1457,6 +1604,7 @@ async function runStartupAttempt() {
       return
     }
 
+    startupProgress.begin('interface')
     setSplashLoading('startupLoadInterface')
     if (mainWindow && !mainWindow.isDestroyed()) {
       currentUrl = started.url
@@ -1467,6 +1615,8 @@ async function runStartupAttempt() {
     maybeCheckForUpdates()
     // 启动可能完成 GitHub 构建来源的修复，菜单里的回滚项可用性随版本来源变化
     tray?.refresh()
+    // 界面已加载完成：这是启动流程最后一个真实事件，进度条在此刻才满
+    startupProgress.finish()
   } catch (err) {
     appendLog(`[startup] unexpected error: ${err && err.stack ? err.stack : err}`)
     setSplashError(

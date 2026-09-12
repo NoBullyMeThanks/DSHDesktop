@@ -106,20 +106,91 @@
       display: flex;
       min-height: 32px;
       margin-top: 12px;
-      align-items: center;
-      gap: 10px;
+      flex-direction: column;
+      justify-content: center;
+      gap: 8px;
       color: var(--text-secondary);
       font-size: 13px;
     }
 
-    .spinner {
-      width: 18px;
-      height: 18px;
+    .stage {
+      overflow: hidden;
+      line-height: 18px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .progress {
+      display: flex;
+      /* 锁定行高：不定量阶段百分比文字为空，若由内容决定高度，
+         这一行会从 16px 塌到 6px，居中后轨道比定量阶段高 5px。 */
+      min-height: 16px;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .progress-track {
+      position: relative;
+      flex: 1;
+      min-width: 0;
+      height: 6px;
+      overflow: hidden;
+      background: color-mix(in srgb, var(--accent) 16%, transparent);
+      border-radius: 999px;
+    }
+
+    .progress-fill {
+      position: absolute;
+      inset: 0;
+      background: var(--accent);
+      border-radius: inherit;
+      transform: scaleX(0);
+      transform-origin: left center;
+      transition: transform 0.24s ease-out;
+      will-change: transform;
+    }
+
+    /* 无法测量总量的阶段（下载/服务启动）：不显示编造的百分比，
+       改用不定量滑块表示「正在进行」，真实事实由下方事件文本给出。 */
+    .progress-indeterminate {
+      position: absolute;
+      inset: 0;
+      display: none;
+      overflow: hidden;
+    }
+
+    .progress[data-measurable='false'] .progress-fill { display: none; }
+    .progress[data-measurable='false'] .progress-indeterminate { display: block; }
+
+    .progress-indeterminate::after {
+      content: '';
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 34%;
+      background: var(--accent);
+      border-radius: inherit;
+      animation: slide 1.4s ease-in-out infinite;
+    }
+
+    .progress-value {
       flex: 0 0 auto;
-      border: 2px solid color-mix(in srgb, var(--accent) 22%, transparent);
-      border-top-color: var(--accent);
-      border-radius: 50%;
-      animation: spin 0.75s linear infinite;
+      min-width: 34px;
+      /* 显式行高：不定量阶段这里没有文字，若不锁定行高会塌陷，
+         使 .progress 行从 16px 缩到 6px，轨道整体上移 5px。 */
+      line-height: 16px;
+      color: var(--text-secondary);
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      text-align: right;
+    }
+
+    /* 真实事件文本（如 npm 实际获取的包数），没有事件时整行不占位 */
+    .metrics {
+      color: var(--text-secondary);
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+      line-height: 16px;
     }
 
     .detail {
@@ -172,10 +243,14 @@
 
     button[data-kind='primary']:hover { background: var(--accent-hover); }
     [hidden] { display: none !important; }
-    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes slide {
+      from { transform: translateX(-110%); }
+      to { transform: translateX(320%); }
+    }
 
     @media (prefers-reduced-motion: reduce) {
-      .spinner { animation-duration: 1.5s; }
+      .progress-fill { transition: none; }
+      .progress-indeterminate::after { animation-duration: 2.6s; }
     }
   </style>
 </head>
@@ -186,8 +261,22 @@
       <h1 id="title">DSH Desktop</h1>
       <p id="message"></p>
       <div id="status" class="status">
-        <span class="spinner" aria-hidden="true"></span>
-        <span id="stage"></span>
+        <span id="stage" class="stage"></span>
+        <div id="progress" class="progress" data-measurable="true">
+          <div
+            id="progress-track"
+            class="progress-track"
+            role="progressbar"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            aria-valuenow="0"
+          >
+            <div id="progress-fill" class="progress-fill"></div>
+            <div class="progress-indeterminate"></div>
+          </div>
+          <span id="progress-value" class="progress-value" aria-hidden="true"></span>
+        </div>
+        <span id="metrics" class="metrics" hidden></span>
       </div>
       <pre id="detail" class="detail" hidden></pre>
       <div id="actions" class="actions" hidden></div>

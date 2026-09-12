@@ -705,6 +705,8 @@ async function ensureRuntime(options = {}) {
     runtimeDir,
     versionFile: options.versionFile,
     log: options.log,
+    // 透传真实安装输出流：调用方据此展示下载进度（总包数 npm 不提供，故只做事实计数）
+    onProgress: options.onProgress,
   })
   return { ...result, repaired: target !== 'latest' }
 }

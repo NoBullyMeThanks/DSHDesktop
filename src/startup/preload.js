@@ -14,6 +14,56 @@ function isValidState(state) {
     typeof state.message === 'string'
 }
 
+function clampPercent(value) {
+  if (!Number.isFinite(value)) return 0
+  return Math.min(100, Math.max(0, value))
+}
+
+/**
+ * 渲染启动进度。只展示主进程下发的真实事件结果：
+ *  - percent：已完成阶段的权重占比（主进程在真实事件点推送）
+ *  - measurable=false：该阶段总量不可测，改用不定量滑块，且不显示百分比
+ *  - metrics：真实发生的事件文本（如 npm 实际获取的包数）
+ * 这里不做任何按时间推演，也不跑补偿动画。
+ */
+function applyProgress(progress) {
+  const percent = clampPercent(Number(progress?.percent))
+  const measurable = progress?.measurable !== false
+  const metrics = typeof progress?.metrics === 'string' ? progress.metrics : ''
+
+  paintProgress(percent, measurable)
+  paintMetrics(metrics)
+}
+
+function resetProgress() {
+  paintProgress(0, true)
+  paintMetrics('')
+}
+
+function paintProgress(percent, measurable) {
+  const fill = document.getElementById('progress-fill')
+  const wrapper = document.getElementById('progress')
+  const track = document.getElementById('progress-track')
+  const label = document.getElementById('progress-value')
+  const rounded = Math.round(percent)
+
+  if (fill) fill.style.transform = `scaleX(${(percent / 100).toFixed(4)})`
+  if (wrapper) wrapper.dataset.measurable = measurable ? 'true' : 'false'
+  if (label) label.textContent = measurable ? `${rounded}%` : ''
+  if (track) {
+    // 不定量时移除 aria-valuenow，避免读屏播报一个编造的百分比
+    if (measurable) track.setAttribute('aria-valuenow', String(rounded))
+    else track.removeAttribute('aria-valuenow')
+  }
+}
+
+function paintMetrics(text) {
+  const metrics = document.getElementById('metrics')
+  if (!metrics) return
+  metrics.textContent = text
+  metrics.hidden = !text
+}
+
 function render(state) {
   if (!isValidState(state)) return
 
@@ -36,6 +86,7 @@ function render(state) {
   if (state.mode === 'loading') {
     status.hidden = false
     stage.textContent = typeof state.stage === 'string' ? state.stage : ''
+    applyProgress(state.progress)
     detail.hidden = true
     detail.textContent = ''
     actions.hidden = true
@@ -46,6 +97,7 @@ function render(state) {
 
   status.hidden = true
   stage.textContent = ''
+  resetProgress()
   detail.textContent = typeof state.detail === 'string' ? state.detail : ''
   detail.hidden = !detail.textContent
   actions.replaceChildren()
