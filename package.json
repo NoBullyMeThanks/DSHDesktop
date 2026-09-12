@@ -1,6 +1,6 @@
 {
   "name": "dshdesktop",
-  "version": "2.0.4",
+  "version": "2.1.0",
   "description": "默认跟随 DeepSeek 官方最新版的 DSH 桌面启动器",
   "main": "src/main.js",
   "private": true,
